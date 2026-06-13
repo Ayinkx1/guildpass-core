@@ -12,7 +12,7 @@ We take security seriously. If you discover a vulnerability, **do not** open a p
 
 ### How to report
 
-1. **Email** **maintainers@guildpass.xyz** with subject `[SECURITY] guildpass-core — <brief description>`.
+1. **Email** **cerealboxx123@gmail.com** with subject `[SECURITY] guildpass-core — <brief description>`.
 2. Include:
    - Description of the vulnerability
    - Steps to reproduce

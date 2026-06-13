@@ -178,7 +178,7 @@ We welcome contributions! See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full 
 
 ### Maintainer contact
 
-- Contact: maintainers@guildpass.xyz
+- Contact: cerealboxx123@gmail.com
 
 ## License
 

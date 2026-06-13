@@ -164,4 +164,4 @@ forge fmt
 ## Communication
 
 - GitHub Issues: preferred for all task discussion
-- Contact: maintainers@guildpass.xyz
+- Contact: cerealboxx123@gmail.com
