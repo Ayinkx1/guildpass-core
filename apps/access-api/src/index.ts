@@ -8,9 +8,14 @@
 import { buildApp } from './app';
 import { config } from './config';
 import { disconnectPrisma } from './services/prisma';
+import { startReconciliationWorker } from './workers/reconciliationWorker';
+
+let stopReconciliation: (() => void) | null = null;
 
 async function main() {
   const app = await buildApp();
+
+  stopReconciliation = startReconciliationWorker(config.reconciliationIntervalMs);
 
   await app.listen({ port: config.port, host: '0.0.0.0' });
 
@@ -28,6 +33,7 @@ const shutdown = async (signal: string) => {
     `\n⏹️  Received ${signal} shutdown signal, closing server...`
   );
   try {
+    stopReconciliation?.();
     await disconnectPrisma();
     console.log('✅ Server and database connections closed cleanly.');
     process.exit(0);
