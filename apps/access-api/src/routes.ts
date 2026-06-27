@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { getMemberService } from './services/memberService';
 import { getPrisma } from './services/prisma';
+import { config } from './config';
 
 /**
  * Register all business routes on the Fastify instance.
@@ -45,7 +46,15 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // GET /v1/communities/:communityId/members — list members for admin
-  app.get('/v1/communities/:communityId/members', async (request, reply) => {
+  // Stricter rate limit: this endpoint performs a full table scan per community.
+  app.get('/v1/communities/:communityId/members', {
+    config: {
+      rateLimit: {
+        max: config.rateLimitExpensiveMax,
+        timeWindow: config.rateLimitWindowMs,
+      },
+    },
+  }, async (request, reply) => {
     const { communityId } = request.params as { communityId: string };
     const role = (request.query as { role?: string })?.role;
     const result = await memberService.listMembersForAdmin(communityId, role as "admin" | "member" | "contributor" | undefined);
