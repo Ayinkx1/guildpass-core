@@ -1,91 +1,116 @@
 /**
  * reconciliationWorker.ts
  *
- * Periodically updates persisted membership states that have drifted from
- * the truth: active/suspended memberships whose expiresAt is in the past
- * are transitioned to "expired" in the DB, and an audit event is written
- * for each change.
+ * Periodically scans memberships whose stored state is `active` but whose
+ * `expiresAt` has passed, and updates them to `expired`.
  *
- * This is a background correctness pass only. Read-time expiry checks in
- * memberService remain the first line of defence.
+ * Design notes:
+ * - Idempotent: only updates records where state != 'expired' AND expiresAt < now.
+ * - Emits one MEMBERSHIP_RECONCILED audit event per changed record.
+ * - Does NOT touch `suspended` memberships whose expiry has passed; those are
+ *   included intentionally so they can be expired as well.
+ * - Read-time expiry checks in memberService remain the first line of defence.
  */
 
-import { PrismaClient } from '@prisma/client';
-import { logEvent } from '../services/auditService';
-import { getPrisma } from '../services/prisma';
+import { PrismaClient } from "@prisma/client";
+import { getPrisma } from "../services/prisma";
+import { logEvent } from "../services/auditService";
 
-export type ReconciliationResult = {
-  processed: number;
-  updated: number;
+export interface ReconciliationResult {
+  updatedCount: number;
   errors: number;
-};
+}
 
 /**
- * Run a single reconciliation pass.
- * Finds memberships with non-expired stored state but a past expiresAt,
- * updates them to "expired", and emits audit events.
- *
- * Safe to call concurrently: the updateMany is idempotent (only targets
- * non-expired rows, so a second concurrent call updates 0 rows).
+ * Run one reconciliation pass. Finds all memberships with a stale non-expired
+ * state where expiresAt is in the past, and marks each as `expired`.
  */
-export async function runReconciliation(
-  prismaOverride?: PrismaClient,
+export async function reconcileMemberships(
+  db?: PrismaClient,
 ): Promise<ReconciliationResult> {
-  const db = prismaOverride ?? getPrisma();
+  const prisma = db ?? getPrisma();
   const now = new Date();
-  let updated = 0;
-  let errors = 0;
 
-  // Find stale memberships: stored state is active or suspended, but expiry has passed.
-  const stale = await db.membership.findMany({
+  // Fetch all stale memberships in one query, including the member for audit context.
+  const stale = await prisma.membership.findMany({
     where: {
-      state: { in: ['active', 'suspended'] },
+      state: { in: ["active", "suspended"] },
       expiresAt: { lt: now },
     },
-    select: { id: true, memberId: true, state: true, expiresAt: true },
+    include: { member: true },
   });
+
+  let updatedCount = 0;
+  let errors = 0;
 
   for (const membership of stale) {
     try {
-      await db.membership.update({
+      await prisma.membership.update({
         where: { id: membership.id },
-        data: { state: 'expired' },
+        data: { state: "expired" },
       });
 
       await logEvent({
-        eventType: 'MEMBERSHIP_UPDATED',
-        communityId: null,
-        walletId: null,
-        reasonCode: 'RECONCILIATION_EXPIRED',
-        beforeState: { memberId: membership.memberId, state: membership.state, expiresAt: membership.expiresAt },
-        afterState: { memberId: membership.memberId, state: 'expired', expiresAt: membership.expiresAt },
+        eventType: "MEMBERSHIP_RECONCILED",
+        walletId: membership.member.walletId,
+        communityId: membership.member.communityId,
+        beforeState: { state: membership.state },
+        afterState: { state: "expired" },
+        reasonCode: "EXPIRY_RECONCILIATION",
       });
 
-      updated++;
+      updatedCount++;
     } catch (err) {
+      // Log individual failures without aborting the whole pass.
+      console.error(
+        `[reconciliationWorker] Failed to reconcile membership ${membership.id}:`,
+        err,
+      );
       errors++;
     }
   }
 
-  return { processed: stale.length, updated, errors };
+  return { updatedCount, errors };
+}
+
+export interface ReconciliationWorker {
+  start(): void;
+  stop(): void;
 }
 
 /**
- * Starts the reconciliation scheduler. Returns a stop function.
- *
- * @param intervalMs  How often to run (default: config value or 5 minutes).
+ * Create a scheduled reconciliation worker that runs at the given interval.
+ * Returns a handle with `start()` and `stop()` methods.
  */
-export function startReconciliationWorker(intervalMs: number): () => void {
-  const timer = setInterval(async () => {
+export function createReconciliationWorker(
+  intervalMs: number,
+  db?: PrismaClient,
+): ReconciliationWorker {
+  let timer: ReturnType<typeof setInterval> | null = null;
+
+  async function run() {
     try {
-      await runReconciliation();
-    } catch {
-      // swallow – individual run errors are tracked inside runReconciliation
+      const result = await reconcileMemberships(db);
+      if (result.updatedCount > 0 || result.errors > 0) {
+        console.log(
+          `[reconciliationWorker] Pass complete: updated=${result.updatedCount} errors=${result.errors}`,
+        );
+      }
+    } catch (err) {
+      console.error("[reconciliationWorker] Unhandled error in pass:", err);
     }
-  }, intervalMs);
+  }
 
-  // Don't block process exit
-  timer.unref();
-
-  return () => clearInterval(timer);
+  return {
+    start() {
+      if (timer !== null) return; // already running
+      timer = setInterval(run, intervalMs);
+    },
+    stop() {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    },
+  };
 }

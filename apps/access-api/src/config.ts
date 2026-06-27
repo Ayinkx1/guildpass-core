@@ -28,7 +28,7 @@ const ConfigSchema = z.object({
     .number()
     .int()
     .positive()
-    .default(300_000), // 5 minutes
+    .default(60_000),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
