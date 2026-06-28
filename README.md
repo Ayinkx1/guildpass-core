@@ -160,6 +160,24 @@ npm run contracts:test
 npm run typecheck
 ```
 
+### Prisma migration checks
+
+When you change the Prisma schema or migration history, validate the database workflow locally before opening a pull request:
+
+```bash
+pnpm install --frozen-lockfile
+createdb guildpass_test
+createdb guildpass_shadow
+DATABASE_URL=postgresql://localhost:5432/guildpass_test \
+SHADOW_DATABASE_URL=postgresql://localhost:5432/guildpass_shadow \
+pnpm --filter access-api prisma:validate
+pnpm --filter access-api prisma:generate
+pnpm --filter access-api prisma:migrate:deploy
+pnpm --filter access-api prisma:migrate:check
+```
+
+The CI workflow runs the same validation steps against a disposable PostgreSQL service and a shadow database so drift is caught before merge.
+
 ### Integration Testing
 
 The **Membership Integration Test** (`apps/access-api/src/membership-integration.test.ts`) validates the complete flow from MembershipNFT contract events to API access decisions:

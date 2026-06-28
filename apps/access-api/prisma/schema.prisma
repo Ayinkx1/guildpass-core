@@ -54,6 +54,8 @@ model Membership {
   renewedAt  DateTime?
   createdAt  DateTime        @default(now())
   member     Member          @relation(fields: [memberId], references: [id])
+
+  @@index([state, expiresAt])
 }
 
 enum Role {
@@ -109,6 +111,7 @@ enum EventType {
   MEMBERSHIP_UPDATED
   MEMBERSHIP_DELETED
   POLICY_EVALUATION
+  MEMBERSHIP_RECONCILED
   OTHER
 }
 
