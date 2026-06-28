@@ -212,6 +212,73 @@ describe('GuildPassClient', () => {
       );
       expect(calledInit.method).toBe(API_CONTRACT.communityMembers.method);
     });
+
+    it('matches the member role assignment contract', async () => {
+      const fetchSpy = makeFetchStub((_url, _init) =>
+        new StubResponse({
+          status: API_CONTRACT.assignMemberRole.successStatus,
+          body: JSON.stringify(API_CONTRACT.assignMemberRole.successResponse),
+        }),
+      );
+      const client = new GuildPassClient({
+        baseUrl: 'https://api.example.com',
+        token: 't',
+        fetchImpl: fetchSpy as unknown as typeof fetch,
+      });
+
+      const result = await client.assignMemberRole(
+        {
+          communityId: 'community-1',
+          wallet: '0x1234567890abcdef1234567890abcdef12345678',
+          role: 'admin',
+        },
+        { requesterWallet: '0x1111111111111111111111111111111111111111' },
+      );
+
+      expect(result).toEqual(API_CONTRACT.assignMemberRole.successResponse);
+      const [calledUrl, calledInit] = fetchSpy.mock.calls[0]!;
+      expect(calledUrl).toBe(
+        `https://api.example.com${API_CONTRACT.assignMemberRole.samplePath}`,
+      );
+      expect(calledInit.method).toBe(API_CONTRACT.assignMemberRole.method);
+      expect(calledInit.body).toBe(
+        JSON.stringify(API_CONTRACT.assignMemberRole.requestBody),
+      );
+      const headers = (calledInit.headers ?? {}) as Record<string, string>;
+      expect(headers['x-wallet']).toBe('0x1111111111111111111111111111111111111111');
+    });
+
+    it('matches the member role removal contract', async () => {
+      const fetchSpy = makeFetchStub((_url, _init) =>
+        new StubResponse({
+          status: API_CONTRACT.removeMemberRole.successStatus,
+          body: JSON.stringify(API_CONTRACT.removeMemberRole.successResponse),
+        }),
+      );
+      const client = new GuildPassClient({
+        baseUrl: 'https://api.example.com',
+        token: 't',
+        fetchImpl: fetchSpy as unknown as typeof fetch,
+      });
+
+      const result = await client.removeMemberRole(
+        {
+          communityId: 'community-1',
+          wallet: '0x1234567890abcdef1234567890abcdef12345678',
+          role: 'admin',
+        },
+        { requesterWallet: '0x1111111111111111111111111111111111111111' },
+      );
+
+      expect(result).toEqual(API_CONTRACT.removeMemberRole.successResponse);
+      const [calledUrl, calledInit] = fetchSpy.mock.calls[0]!;
+      expect(calledUrl).toBe(
+        `https://api.example.com${API_CONTRACT.removeMemberRole.samplePath}`,
+      );
+      expect(calledInit.method).toBe(API_CONTRACT.removeMemberRole.method);
+      const headers = (calledInit.headers ?? {}) as Record<string, string>;
+      expect(headers['x-wallet']).toBe('0x1111111111111111111111111111111111111111');
+    });
   });
 
   describe('error mapping', () => {
