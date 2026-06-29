@@ -1,8 +1,8 @@
 export const API_CONTRACT = {
   membershipsByWallet: {
     method: 'GET',
-    pathTemplate: '/v1/memberships/:wallet',
-    samplePath: '/v1/memberships/0x1234567890abcdef1234567890abcdef12345678',
+    pathTemplate: '/v1/communities/:communityId/memberships/:wallet',
+    samplePath: '/v1/communities/community-1/memberships/0x1234567890abcdef1234567890abcdef12345678',
     successStatus: 200,
     successResponse: {
       wallet: '0x1234567890abcdef1234567890abcdef12345678',
@@ -16,8 +16,8 @@ export const API_CONTRACT = {
   },
   memberProfileByWallet: {
     method: 'GET',
-    pathTemplate: '/v1/members/:wallet',
-    samplePath: '/v1/members/0x1234567890abcdef1234567890abcdef12345678',
+    pathTemplate: '/v1/communities/:communityId/members/:wallet',
+    samplePath: '/v1/communities/community-1/members/0x1234567890abcdef1234567890abcdef12345678',
     successStatus: 200,
     successResponse: {
       communityId: 'community-1',
@@ -73,6 +73,35 @@ export const API_CONTRACT = {
     },
     errorResponse: {
       404: { error: 'NOT_FOUND', code: 'NOT_FOUND', message: 'Community not found', statusCode: 404 },
+    },
+  },
+  assignMemberRole: {
+    method: 'POST',
+    pathTemplate: '/v1/communities/:communityId/members/:wallet/roles',
+    samplePath: '/v1/communities/community-1/members/0x1234567890abcdef1234567890abcdef12345678/roles',
+    requestBody: { role: 'admin' },
+    successStatus: 200,
+    successResponse: {
+      communityId: 'community-1',
+      wallet: '0x1234567890abcdef1234567890abcdef12345678',
+      role: 'admin',
+      assigned: true,
+      removed: false,
+      message: 'Role assigned',
+    },
+  },
+  removeMemberRole: {
+    method: 'DELETE',
+    pathTemplate: '/v1/communities/:communityId/members/:wallet/roles/:role',
+    samplePath: '/v1/communities/community-1/members/0x1234567890abcdef1234567890abcdef12345678/roles/admin',
+    successStatus: 200,
+    successResponse: {
+      communityId: 'community-1',
+      wallet: '0x1234567890abcdef1234567890abcdef12345678',
+      role: 'admin',
+      assigned: false,
+      removed: true,
+      message: 'Role removed',
     },
   },
 } as const;

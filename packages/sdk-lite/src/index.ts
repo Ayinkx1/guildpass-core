@@ -1,5 +1,7 @@
 import { GuildPassApiError } from './errors';
 
+declare const process: { env: Record<string, string | undefined> };
+
 export interface AccessCheckResult {
   allowed: boolean;
   code?: string;
@@ -46,6 +48,23 @@ export interface CommunityMembersResult {
     state: string;
     roles: string[];
   }>;
+}
+
+export type CommunityRole = 'admin' | 'member' | 'contributor';
+
+export interface RoleMutationInput {
+  communityId: string;
+  wallet: string;
+  role: CommunityRole;
+}
+
+export interface RoleMutationResult {
+  communityId: string;
+  wallet: string;
+  role: CommunityRole;
+  assigned: boolean;
+  removed: boolean;
+  message?: string;
 }
 
 export interface GuildPassClientOptions {
@@ -150,6 +169,45 @@ export class GuildPassClient {
     return this._request<CommunityMembersResult>(
       `/v1/communities/${encodePathSegment(communityId)}/members${query}`,
       { method: 'GET' },
+    );
+  }
+
+  /**
+   * Assign a role to a member in a community.
+   */
+  async assignMemberRole(
+    input: RoleMutationInput,
+    options: { requesterWallet?: string } = {},
+  ): Promise<RoleMutationResult> {
+    const headers = options.requesterWallet
+      ? { 'x-wallet': options.requesterWallet }
+      : undefined;
+    return this._request<RoleMutationResult>(
+      `/v1/communities/${encodePathSegment(input.communityId)}/members/${encodePathSegment(input.wallet)}/roles`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ role: input.role }),
+      },
+    );
+  }
+
+  /**
+   * Remove a role from a member in a community.
+   */
+  async removeMemberRole(
+    input: RoleMutationInput,
+    options: { requesterWallet?: string } = {},
+  ): Promise<RoleMutationResult> {
+    const headers = options.requesterWallet
+      ? { 'x-wallet': options.requesterWallet }
+      : undefined;
+    return this._request<RoleMutationResult>(
+      `/v1/communities/${encodePathSegment(input.communityId)}/members/${encodePathSegment(input.wallet)}/roles/${encodePathSegment(input.role)}`,
+      {
+        method: 'DELETE',
+        headers,
+      },
     );
   }
 
@@ -294,15 +352,7 @@ function buildHttpErrorMessage(
     // Not JSON — fall through to the raw-body branch.
   }
 
-  const trimmed = body.trim();
-  if (trimmed.length > 0) {
-    const snippet =
-      trimmed.length > MAX_RESPONSE_BODY_CHARS
-        ? `${trimmed.slice(0, MAX_RESPONSE_BODY_CHARS)}…`
-        : trimmed;
-    return `${base}: ${snippet}`;
-  }
-  return base;
+  return `${base}: ${body}`;
 }
 
 function encodePathSegment(value: string): string {

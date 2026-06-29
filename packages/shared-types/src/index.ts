@@ -66,6 +66,29 @@ export interface RoleAssignment {
   active: boolean;
 }
 
+export interface AssignRoleInput {
+  requesterWallet: WalletAddress;
+  communityId: string;
+  targetWallet: WalletAddress;
+  role: Role;
+}
+
+export interface RemoveRoleInput {
+  requesterWallet: WalletAddress;
+  communityId: string;
+  targetWallet: WalletAddress;
+  role: Role;
+}
+
+export interface RoleMutationResult {
+  communityId: string;
+  wallet: WalletAddress;
+  role: Role;
+  assigned: boolean;
+  removed: boolean;
+  message?: string;
+}
+
 export interface RoleContext {
   assignments: RoleAssignment[];
   membershipState: MembershipState;
