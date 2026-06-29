@@ -1,5 +1,7 @@
 import { GuildPassApiError } from './errors';
 
+declare const process: { env: Record<string, string | undefined> };
+
 export interface AccessCheckResult {
   allowed: boolean;
   code?: string;
@@ -48,6 +50,23 @@ export interface CommunityMembersResult {
   }>;
 }
 
+export type CommunityRole = 'admin' | 'member' | 'contributor';
+
+export interface RoleMutationInput {
+  communityId: string;
+  wallet: string;
+  role: CommunityRole;
+}
+
+export interface RoleMutationResult {
+  communityId: string;
+  wallet: string;
+  role: CommunityRole;
+  assigned: boolean;
+  removed: boolean;
+  message?: string;
+}
+
 export interface GuildPassClientOptions {
   /** Base URL of the GuildPass API, e.g. `https://api.guildpass.example.com`. */
   baseUrl: string;
@@ -64,6 +83,15 @@ export interface GuildPassClientOptions {
 
 /** Maximum characters of a response body retained on a {@link GuildPassApiError}. */
 const MAX_RESPONSE_BODY_CHARS = 500;
+
+/** Shape of the standardised API error envelope. */
+interface ApiErrorEnvelope {
+  error: string;
+  code: string;
+  message: string;
+  statusCode: number;
+  details?: string | Record<string, unknown>;
+}
 
 export class GuildPassClient {
   private readonly baseUrl: string;
@@ -145,6 +173,45 @@ export class GuildPassClient {
   }
 
   /**
+   * Assign a role to a member in a community.
+   */
+  async assignMemberRole(
+    input: RoleMutationInput,
+    options: { requesterWallet?: string } = {},
+  ): Promise<RoleMutationResult> {
+    const headers = options.requesterWallet
+      ? { 'x-wallet': options.requesterWallet }
+      : undefined;
+    return this._request<RoleMutationResult>(
+      `/v1/communities/${encodePathSegment(input.communityId)}/members/${encodePathSegment(input.wallet)}/roles`,
+      {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ role: input.role }),
+      },
+    );
+  }
+
+  /**
+   * Remove a role from a member in a community.
+   */
+  async removeMemberRole(
+    input: RoleMutationInput,
+    options: { requesterWallet?: string } = {},
+  ): Promise<RoleMutationResult> {
+    const headers = options.requesterWallet
+      ? { 'x-wallet': options.requesterWallet }
+      : undefined;
+    return this._request<RoleMutationResult>(
+      `/v1/communities/${encodePathSegment(input.communityId)}/members/${encodePathSegment(input.wallet)}/roles/${encodePathSegment(input.role)}`,
+      {
+        method: 'DELETE',
+        headers,
+      },
+    );
+  }
+
+  /**
    * Internal request helper. Centralises URL building, headers, error mapping,
    * JSON parsing, and empty-body handling.
    */
@@ -187,11 +254,14 @@ export class GuildPassClient {
         body.length > MAX_RESPONSE_BODY_CHARS
           ? `${body.slice(0, MAX_RESPONSE_BODY_CHARS)}…[truncated]`
           : body;
+      const { message, code, details } = parseErrorEnvelope(body);
       throw new GuildPassApiError({
         statusCode: res.status,
         path,
-        message: buildHttpErrorMessage(res.status, res.statusText, body),
+        message: message ?? buildHttpErrorMessage(res.status, res.statusText, body),
         responseBody: truncated,
+        code: code ?? String(res.status),
+        details,
       });
     }
 
@@ -235,6 +305,29 @@ async function safeReadText(res: Response): Promise<string> {
   }
 }
 
+/** Attempt to parse the standardised API error envelope from a response body. */
+function parseErrorEnvelope(body: string): {
+  message?: string;
+  code?: string;
+  details?: string | Record<string, unknown>;
+} {
+  try {
+    const parsed = JSON.parse(body) as Partial<ApiErrorEnvelope>;
+    // Only trust the envelope when both `error` and `message` are present
+    // (avoids treating unrelated JSON as an error envelope).
+    if (typeof parsed.error === 'string' && typeof parsed.message === 'string') {
+      return {
+        message: parsed.message,
+        code: parsed.error,
+        details: parsed.details,
+      };
+    }
+  } catch {
+    // Not JSON — caller will fall back to raw-body message building.
+  }
+  return {};
+}
+
 function buildHttpErrorMessage(
   status: number,
   statusText: string,
@@ -259,15 +352,7 @@ function buildHttpErrorMessage(
     // Not JSON — fall through to the raw-body branch.
   }
 
-  const trimmed = body.trim();
-  if (trimmed.length > 0) {
-    const snippet =
-      trimmed.length > MAX_RESPONSE_BODY_CHARS
-        ? `${trimmed.slice(0, MAX_RESPONSE_BODY_CHARS)}…`
-        : trimmed;
-    return `${base}: ${snippet}`;
-  }
-  return base;
+  return `${base}: ${body}`;
 }
 
 function encodePathSegment(value: string): string {
