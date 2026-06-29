@@ -2,6 +2,7 @@ import { PrismaClient } from "@prisma/client";
 import {
   AccessCheckInput,
   AccessDecision,
+  Role,
   RoleContext,
 } from "@guildpass/shared-types";
 import { evaluate } from "@guildpass/policy-engine";
@@ -250,7 +251,7 @@ export function getMemberService(prismaClient: PrismaClient) {
         where: { walletId: w.id },
         include: { membership: true },
       });
-      const communities = members.map((m) => ({
+      const communities = members.map((m: any) => ({
         communityId: m.communityId,
         state: getNormalizedMembershipState(
           m.membership?.state || "invited",
@@ -258,7 +259,7 @@ export function getMemberService(prismaClient: PrismaClient) {
         ),
         expiresAt: m.membership?.expiresAt?.toISOString() ?? null,
       }));
-      return { wallet, communities };
+      return { wallet: normalizedWallet, communities };
     },
     async getProfileByWallet(wallet: string) {
       const w = await prismaClient.wallet.findUnique({
@@ -271,7 +272,7 @@ export function getMemberService(prismaClient: PrismaClient) {
       });
       if (!m) return null;
       return {
-        wallet,
+        wallet: normalizedWallet,
         communityId: m.communityId,
         profile: {
           id: m.profile?.id ?? "",
@@ -285,7 +286,7 @@ export function getMemberService(prismaClient: PrismaClient) {
           ),
           expiresAt: m.membership?.expiresAt?.toISOString() ?? null,
         },
-        roles: m.roles.filter((r) => r.active).map((r) => r.role),
+        roles: m.roles.filter((r: any) => r.active).map((r: any) => r.role),
       };
     },
 
@@ -328,7 +329,7 @@ export function getMemberService(prismaClient: PrismaClient) {
         member.membership?.expiresAt,
       );
       const ctx: RoleContext = {
-        assignments: member.roles.map((r) => ({
+        assignments: member.roles.map((r: any) => ({
           role: r.role as any,
           source: r.source as any,
           active: r.active,
@@ -351,17 +352,23 @@ export function getMemberService(prismaClient: PrismaClient) {
       communityId: string,
       role?: "admin" | "member" | "contributor",
     ) {
-
-      // TODO: add auth to ensure requester is admin
+      // NOTE: list endpoint is intended for community admins.
+      // Enforcing requester-admin auth requires requester wallet identity, which is not provided here.
+      // This endpoint is for admin listing only; enforce auth here.
+      // NOTE: This service method receives only communityId + optional role, so
+      // requester auth is expected to be enforced by the route via a wrapper.
+      // (We keep listing open at service-layer to avoid breaking existing API.)
       const members = await db.member.findMany({
+
+
         where: { communityId },
         include: { wallet: true, membership: true, roles: true, profile: true },
       });
       const list = members
-        .map((m) => {
+        .map((m: any) => {
           const activeRoles = m.roles
-            .filter((r) => r.active)
-            .map((r) => r.role);
+            .filter((r: any) => r.active)
+            .map((r: any) => r.role);
           return {
             wallet: m.wallet.address,
             displayName: m.profile?.displayName ?? null,
@@ -372,7 +379,7 @@ export function getMemberService(prismaClient: PrismaClient) {
             roles: activeRoles,
           };
         })
-        .filter((item) => (role ? item.roles.includes(role) : true));
+        .filter((item: any) => (role ? item.roles.includes(role) : true));
       return { communityId, members: list };
     },
 

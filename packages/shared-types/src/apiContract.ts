@@ -62,6 +62,35 @@ export const API_CONTRACT = {
       ],
     },
   },
+  assignMemberRole: {
+    method: 'POST',
+    pathTemplate: '/v1/communities/:communityId/members/:wallet/roles',
+    samplePath: '/v1/communities/community-1/members/0x1234567890abcdef1234567890abcdef12345678/roles',
+    requestBody: { role: 'admin' },
+    successStatus: 200,
+    successResponse: {
+      communityId: 'community-1',
+      wallet: '0x1234567890abcdef1234567890abcdef12345678',
+      role: 'admin',
+      assigned: true,
+      removed: false,
+      message: 'Role assigned',
+    },
+  },
+  removeMemberRole: {
+    method: 'DELETE',
+    pathTemplate: '/v1/communities/:communityId/members/:wallet/roles/:role',
+    samplePath: '/v1/communities/community-1/members/0x1234567890abcdef1234567890abcdef12345678/roles/admin',
+    successStatus: 200,
+    successResponse: {
+      communityId: 'community-1',
+      wallet: '0x1234567890abcdef1234567890abcdef12345678',
+      role: 'admin',
+      assigned: false,
+      removed: true,
+      message: 'Role removed',
+    },
+  },
 } as const;
 
 export type ApiContract = typeof API_CONTRACT;
