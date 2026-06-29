@@ -107,6 +107,23 @@ Responses include `allowed`/`denied` plus human-readable and machine-readable re
 
 ---
 
+## OpenAPI Specification
+
+A stable, machine-readable OpenAPI specification is generated for all public API routes to support SDKs and integrations.
+
+- **Specification File:** [docs/openapi.json](./docs/openapi.json)
+
+**For Contributors:**
+When adding or modifying routes in the Access API, you must update the checked-in specification. Run the following command from the root of the repository:
+
+```bash
+npm run -w access-api openapi:generate
+```
+
+CI will automatically verify that the OpenAPI specification is up-to-date with your code changes.
+
+---
+
 ## Data Model
 
 Prisma schema includes: `communities`, `wallets`, `members`, `memberships`, `roles`, `access policies`, `profiles`, `badges` (placeholder).
@@ -142,6 +159,24 @@ npm run contracts:test
 # TypeScript type checking
 npm run typecheck
 ```
+
+### Prisma migration checks
+
+When you change the Prisma schema or migration history, validate the database workflow locally before opening a pull request:
+
+```bash
+pnpm install --frozen-lockfile
+createdb guildpass_test
+createdb guildpass_shadow
+DATABASE_URL=postgresql://localhost:5432/guildpass_test \
+SHADOW_DATABASE_URL=postgresql://localhost:5432/guildpass_shadow \
+pnpm --filter access-api prisma:validate
+pnpm --filter access-api prisma:generate
+pnpm --filter access-api prisma:migrate:deploy
+pnpm --filter access-api prisma:migrate:check
+```
+
+The CI workflow runs the same validation steps against a disposable PostgreSQL service and a shadow database so drift is caught before merge.
 
 ### Integration Testing
 
