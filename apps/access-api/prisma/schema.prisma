@@ -172,11 +172,27 @@ model AuditEvent {
   reasonCode  String? // machine-readable code for decision
   beforeState Json?
   afterState  Json?
+  
+  // Correlation ID for linking related events across the system
+  correlationId String?
+  
+  // On-chain event metadata (when audit event originated from blockchain)
+  chainId         Int?
+  txHash          String?
+  blockNumber     Int?
+  logIndex        Int?
+  
+  // Snapshot of state versions at time of access decision
+  membershipStateVersion String? // JSON snapshot of membership state used
+  roleStateVersion       String? // JSON snapshot of roles used
+  
   createdAt   DateTime  @default(now())
 
   @@index([walletId])
   @@index([communityId])
   @@index([createdAt])
+  @@index([correlationId])
+  @@index([txHash])
 }
 
 // --- Integration Event Outbox ---
@@ -214,6 +230,7 @@ model OutboxEvent {
   @@index([nextRetryAt])
   @@index([correlationId])
   @@index([status, nextRetryAt])
+  @@index([correlationId])
 }
 
 // --- Chain Indexer Reorg Safety & Idempotency ---
