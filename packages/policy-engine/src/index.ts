@@ -249,16 +249,26 @@ export function evaluate(
   }
 }
 
+/**
+ * Generate human-readable explanation of policy evaluation (backward compatible)
+ * 
+ * @param policy - The access policy to evaluate
+ * @param ctx - The user's role context
+ * @returns Multi-line string explaining the decision
+ */
 export function explain(policy: AccessPolicy, ctx: RoleContext): string {
   const decision = evaluate(policy, ctx);
-  const status = decision.allowed ? "ALLOWED" : "DENIED";
+  const status = decision.allowed ? 'ALLOWED' : 'DENIED';
   const paramsString = policy.params
     ? ` params=${JSON.stringify(policy.params)}`
-    : "";
+    : '';
   const lines = [
     `${status} for ruleType=${policy.ruleType}${paramsString}`,
-    `roles=[${(decision.effectiveRoles || []).join(", ")}]`,
+    `roles=[${(decision.effectiveRoles || []).join(', ')}]`,
     ...decision.reasons.map((r) => `- ${r.code}: ${r.message}`),
   ];
-  return lines.join("\n");
+  return lines.join('\n');
 }
+
+// Re-export resolveEffectiveRoles for backward compatibility
+export { resolveEffectiveRoles };
