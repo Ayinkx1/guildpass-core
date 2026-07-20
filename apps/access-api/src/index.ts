@@ -23,6 +23,8 @@ async function main() {
     undefined, // Use default no-op handler; replace for production
     undefined, // Use default Prisma client
     config.outboxWorkerBatchSize,
+    undefined, // Use a generated worker id (unique per process)
+    config.outboxWorkerClaimLeaseMs,
   );
   outboxWorker.start();
 

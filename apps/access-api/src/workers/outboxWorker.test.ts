@@ -25,6 +25,7 @@ jest.mock("../services/prisma", () => ({
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
       count: jest.fn().mockResolvedValue(0),
     },
+    $queryRaw: jest.fn().mockResolvedValue([]),
   })),
 }));
 
@@ -74,6 +75,40 @@ function makePrismaWithEvents(pendingEvents: any[] = []) {
     deadLetterEvent: {
       create: jest.fn(async (args: any) => ({ id: "dl-1", ...args.data })),
     },
+    // Stub for claimPendingOutboxEvents' raw claim query (see
+    // services/outboxService.test.ts for the same pattern, documented
+    // there). Mutates `events` in place so a claimed row isn't reclaimed
+    // until its lease elapses — mirroring the real UPDATE's atomicity.
+    $queryRaw: jest.fn(async (_strings: TemplateStringsArray, ...values: any[]) => {
+      const [workerId, leaseMs, limit] = values;
+      const now = new Date();
+      const eligible = events.filter(
+        (r: any) =>
+          r.status === "pending" &&
+          r.nextRetryAt &&
+          new Date(r.nextRetryAt) <= now &&
+          (!r.claimExpiresAt || new Date(r.claimExpiresAt) < now),
+      );
+      eligible.sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      );
+      const claimed = eligible.slice(0, limit);
+      const claimExpiresAt = new Date(now.getTime() + leaseMs);
+      claimed.forEach((r: any) => {
+        r.claimedAt = now;
+        r.claimedBy = workerId;
+        r.claimExpiresAt = claimExpiresAt;
+      });
+      return claimed.map((r: any) => ({
+        id: r.id,
+        eventType: r.eventType,
+        entityId: r.entityId,
+        entityType: r.entityType,
+        communityId: r.communityId,
+        payload: r.payload,
+        createdAt: r.createdAt,
+      }));
+    }),
     _updated: updated,
   } as any;
 }

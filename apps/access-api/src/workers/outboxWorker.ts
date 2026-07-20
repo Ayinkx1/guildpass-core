@@ -18,11 +18,11 @@
  *     production-ready HMAC-signed webhook implementation.
  */
 
+import { randomUUID } from "node:crypto";
 import { PrismaClient } from "@prisma/client";
 import { getPrisma } from "../services/prisma";
 import {
-  getPendingOutboxEvents,
-  getOutboxStats,
+  claimPendingOutboxEvents,
   markOutboxDelivered,
   markOutboxFailed,
   pruneDeliveredOutboxEvents,
@@ -75,15 +75,28 @@ export interface OutboxWorker {
   runOnce(): Promise<OutboxWorkerResult>;
 }
 
+/** Default claim identity/lease if the caller doesn't supply one (production
+ *  always does, via createOutboxWorker — see config.ts's
+ *  outboxWorkerClaimLeaseMs). */
+const DEFAULT_CLAIM_LEASE_MS = 60_000;
+
 /**
  * Process one batch of pending outbox events.
+ *
+ * `workerId` identifies this worker instance in the `claimedBy` column —
+ * distinct instances must pass distinct values (defaults to a fresh UUID
+ * per call, which is enough for correctness but not useful for debugging
+ * which long-lived instance owns a claim; createOutboxWorker generates one
+ * stable value per worker for that reason).
  */
 export async function processOutboxBatch(
   db: PrismaClient,
   handler: OutboxEventHandler,
   batchSize: number = 50,
+  workerId: string = randomUUID(),
+  claimLeaseMs: number = DEFAULT_CLAIM_LEASE_MS,
 ): Promise<OutboxWorkerResult> {
-  const pending = await getPendingOutboxEvents(db as any, batchSize);
+  const pending = await claimPendingOutboxEvents(db as any, batchSize, workerId, claimLeaseMs);
 
   let delivered = 0;
   let failed = 0;
@@ -158,12 +171,24 @@ export async function processOutboxBatch(
  * @param handler      Optional custom delivery handler.
  * @param db           Optional Prisma client (injected for testing).
  * @param batchSize    Max events to process per pass.
+ * @param workerId     Identifies this instance in the claim lease's
+ *                     `claimedBy` column, so distinct instances running
+ *                     against the same database never collide on a claim
+ *                     (see claimPendingOutboxEvents). Defaults to a fresh
+ *                     UUID per worker — override only if you need a stable,
+ *                     human-readable identity in the DB for debugging.
+ * @param claimLeaseMs How long a claimed batch is held before another
+ *                     instance may reclaim it if this one never finishes
+ *                     (crash recovery — see config.ts's
+ *                     outboxWorkerClaimLeaseMs).
  */
 export function createOutboxWorker(
   intervalMs: number,
   handler?: OutboxEventHandler,
   db?: PrismaClient,
   batchSize?: number,
+  workerId: string = randomUUID(),
+  claimLeaseMs?: number,
 ): OutboxWorker {
   const prisma = db ?? getPrisma();
   const eventHandler = handler ?? defaultHandler;
@@ -172,7 +197,13 @@ export function createOutboxWorker(
 
   async function run() {
     try {
-      const result = await processOutboxBatch(prisma, eventHandler, batch);
+      const result = await processOutboxBatch(
+        prisma,
+        eventHandler,
+        batch,
+        workerId,
+        claimLeaseMs,
+      );
       if (result.processed > 0) {
         // eslint-disable-next-line no-console
         console.log(
@@ -211,7 +242,7 @@ export function createOutboxWorker(
     },
 
     async runOnce(): Promise<OutboxWorkerResult> {
-      return processOutboxBatch(prisma, eventHandler, batch);
+      return processOutboxBatch(prisma, eventHandler, batch, workerId, claimLeaseMs);
     },
   };
 }

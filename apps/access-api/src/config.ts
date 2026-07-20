@@ -61,6 +61,16 @@ const ConfigSchema = z.object({
     .int()
     .positive()
     .default(50),
+  // How long a worker's claim on a batch of events is honored before another
+  // worker instance may reclaim them (distributed-locking crash recovery —
+  // see workers/outboxWorker.ts and the README's Integration Event Outbox
+  // section). Must comfortably exceed the slowest realistic handler call;
+  // the bundled webhook handler's default per-subscription timeout is 5s.
+  outboxWorkerClaimLeaseMs: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(60_000),
 
   // Indexer worker
   indexerIntervalMs: z.coerce
@@ -111,6 +121,7 @@ function validateConfig(): Config {
     reconciliationIntervalMs: process.env.RECONCILIATION_INTERVAL_MS,
     outboxWorkerIntervalMs: process.env.OUTBOX_WORKER_INTERVAL_MS,
     outboxWorkerBatchSize: process.env.OUTBOX_WORKER_BATCH_SIZE,
+    outboxWorkerClaimLeaseMs: process.env.OUTBOX_WORKER_CLAIM_LEASE_MS,
     indexerIntervalMs: process.env.INDEXER_INTERVAL_MS,
     indexerFinalityWindow: process.env.INDEXER_FINALITY_WINDOW,
     rateLimitEnabled: process.env.RATE_LIMIT_ENABLED,
