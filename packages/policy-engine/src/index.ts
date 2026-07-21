@@ -5,8 +5,25 @@ import {
   DecisionReason,
   RoleContext,
   Role,
-  MembershipState,
 } from "@guildpass/shared-types";
+import { resolveEffectiveRoles as originalResolveEffectiveRoles } from "./roles";
+import {
+  PolicyRulePlugin,
+  PolicyRulePluginRegistry,
+} from "./types";
+import {
+  PublicRule,
+  MembersOnlyRule,
+  AdminsOnlyRule,
+  ContributorsOrAdminsRule,
+} from "./rules";
+
+// Re-export for backward compatibility
+export { resolveEffectiveRoles } from "./roles";
+export {
+  PolicyEngine,
+  createDefaultEngine,
+} from "./engine";
 
 function unique<T>(arr: T[]): T[] {
   return Array.from(new Set(arr));
@@ -62,66 +79,54 @@ function validatePolicy(
     return { valid: false, message: "Policy params must be a JSON object" };
   }
 
-  switch (policy.ruleType) {
-    case "PUBLIC":
-    case "MEMBERS_ONLY":
-    case "ADMINS_ONLY":
-    case "CONTRIBUTORS_OR_ADMINS":
-      return { valid: true };
-    default:
-      return {
-        valid: false,
-        message: `Unhandled ruleType: ${policy.ruleType}`,
-      };
-  }
+  return { valid: true };
 }
 
-export function resolveEffectiveRoles(ctx: RoleContext): Role[] {
-  const roles: Role[] = [];
-  const now = new Date();
-
-  for (const a of ctx.assignments) {
-    if (!a.active) continue;
-    if (a.expiresAt) {
-      const expiry = new Date(a.expiresAt);
-      if (expiry < now) continue;
-    }
-    roles.push(a.role);
-  }
-
-  if (ctx.membershipState === "active") {
-    roles.push("member");
-  }
-
-  // Role hierarchy implementation:
-  // admin -> contributor -> member
-  const effective: Role[] = [...roles];
-  if (roles.includes("admin")) {
-    effective.push("contributor");
-    effective.push("member");
-  }
-  if (roles.includes("contributor")) {
-    effective.push("member");
-  }
-
-  return unique(effective);
+/**
+ * Create a default plugin registry with all built-in rules registered
+ */
+export function createDefaultRegistry(): PolicyRulePluginRegistry {
+  const registry = new PolicyRulePluginRegistry();
+  registry.register(new PublicRule());
+  registry.register(new MembersOnlyRule());
+  registry.register(new AdminsOnlyRule());
+  registry.register(new ContributorsOrAdminsRule());
+  return registry;
 }
 
+// Default registry instance
+const defaultRegistry = createDefaultRegistry();
+
+/**
+ * Get the default plugin registry
+ */
+export function getDefaultRegistry(): PolicyRulePluginRegistry {
+  return defaultRegistry;
+}
+
+/**
+ * Evaluate an access policy using the plugin registry (backward compatible)
+ */
 export function evaluate(
   policy: AccessPolicy,
   ctx: RoleContext,
+  registry?: PolicyRulePluginRegistry,
 ): AccessDecision {
-  const roles = resolveEffectiveRoles(ctx);
-  const reasons: DecisionReason[] = [];
+  const effectiveRoles = originalResolveEffectiveRoles(ctx);
+  const pluginRegistry = registry || defaultRegistry;
 
-  // Always record membership state as a reason context
-  reasons.push({
-    code: `MEMBERSHIP_${ctx.membershipState.toUpperCase()}`,
-    message: `Membership is ${ctx.membershipState}`,
-  });
+  // Always start with membership state as reason
+  const initialReasons: DecisionReason[] = [
+    {
+      code: `MEMBERSHIP_${ctx.membershipState.toUpperCase()}`,
+      message: `Membership is ${ctx.membershipState}`,
+    },
+  ];
 
+  // Check access overrides first (highest priority)
   const override = findActiveOverride(ctx, policy);
   if (override) {
+    const reasons = [...initialReasons];
     reasons.push({
       code: override.effect === "ALLOW" ? "OVERRIDE_ALLOW" : "OVERRIDE_DENY",
       message: override.reason
@@ -132,13 +137,15 @@ export function evaluate(
       allowed: override.effect === "ALLOW",
       code: override.effect === "ALLOW" ? "ALLOW" : "DENY",
       reasons,
-      effectiveRoles: roles,
+      effectiveRoles,
       membershipState: ctx.membershipState,
     };
   }
 
+  // Validate policy
   const validation = validatePolicy(policy);
   if (!validation.valid) {
+    const reasons = [...initialReasons];
     reasons.push({
       code: "MALFORMED_POLICY",
       message: `Malformed policy: ${validation.message}`,
@@ -147,117 +154,41 @@ export function evaluate(
       allowed: false,
       code: "DENY",
       reasons,
-      effectiveRoles: roles,
+      effectiveRoles,
       membershipState: ctx.membershipState,
     };
   }
 
-  const has = (r: Role) => roles.includes(r);
-
-  switch (policy.ruleType) {
-    case "PUBLIC":
-      reasons.push({ code: "RULE_PUBLIC", message: "Resource is public" });
-      return {
-        allowed: true,
-        code: "ALLOW",
-        reasons,
-        effectiveRoles: roles,
-        membershipState: ctx.membershipState,
-      };
-    case "MEMBERS_ONLY":
-      if (ctx.membershipState !== "active") {
-        reasons.push({
-          code: "NEEDS_ACTIVE",
-          message: "Requires active membership",
-        });
-        return {
-          allowed: false,
-          code: "DENY",
-          reasons,
-          effectiveRoles: roles,
-          membershipState: ctx.membershipState,
-        };
-      }
-      reasons.push({
-        code: "HAS_ACTIVE_MEMBERSHIP",
-        message: "Active membership grants access",
-      });
-      return {
-        allowed: true,
-        code: "ALLOW",
-        reasons,
-        effectiveRoles: roles,
-        membershipState: ctx.membershipState,
-      };
-    case "ADMINS_ONLY":
-      if (!has("admin")) {
-        reasons.push({ code: "NEEDS_ADMIN", message: "Admin role required" });
-        return {
-          allowed: false,
-          code: "DENY",
-          reasons,
-          effectiveRoles: roles,
-          membershipState: ctx.membershipState,
-        };
-      }
-      reasons.push({ code: "HAS_ADMIN", message: "Admin role grants access" });
-      return {
-        allowed: true,
-        code: "ALLOW",
-        reasons,
-        effectiveRoles: roles,
-        membershipState: ctx.membershipState,
-      };
-    case "CONTRIBUTORS_OR_ADMINS":
-      if (has("admin") || has("contributor")) {
-        reasons.push({
-          code: "HAS_REQUIRED_ROLE",
-          message: "Contributor or admin grants access",
-        });
-        return {
-          allowed: true,
-          code: "ALLOW",
-          reasons,
-          effectiveRoles: roles,
-          membershipState: ctx.membershipState,
-        };
-      }
-      reasons.push({
-        code: "NEEDS_CONTRIBUTOR_OR_ADMIN",
-        message: "Contributor or admin required",
-      });
-      return {
-        allowed: false,
-        code: "DENY",
-        reasons,
-        effectiveRoles: roles,
-        membershipState: ctx.membershipState,
-      };
-    default: {
-      reasons.push({
-        code: "RULE_UNHANDLED",
-        message: `Unhandled or malformed policy rule: ${policy.ruleType}`,
-      });
-      return {
-        allowed: false,
-        code: "DENY",
-        reasons,
-        effectiveRoles: roles,
-        membershipState: ctx.membershipState,
-      };
-    }
+  // Get plugin for rule type
+  const plugin = pluginRegistry.get(policy.ruleType);
+  if (!plugin) {
+    const reasons = [...initialReasons];
+    reasons.push({
+      code: "RULE_UNHANDLED",
+      message: `Unhandled or malformed policy rule: ${policy.ruleType}`,
+    });
+    return {
+      allowed: false,
+      code: "DENY",
+      reasons,
+      effectiveRoles,
+      membershipState: ctx.membershipState,
+    };
   }
+
+  // Use plugin to evaluate
+  return plugin.evaluate(policy, ctx, effectiveRoles);
 }
 
 /**
- * Generate human-readable explanation of policy evaluation (backward compatible)
- * 
- * @param policy - The access policy to evaluate
- * @param ctx - The user's role context
- * @returns Multi-line string explaining the decision
+ * Explain a policy decision using the plugin registry (backward compatible)
  */
-export function explain(policy: AccessPolicy, ctx: RoleContext): string {
-  const decision = evaluate(policy, ctx);
+export function explain(
+  policy: AccessPolicy,
+  ctx: RoleContext,
+  registry?: PolicyRulePluginRegistry,
+): string {
+  const decision = evaluate(policy, ctx, registry);
   const status = decision.allowed ? 'ALLOWED' : 'DENIED';
   const paramsString = policy.params
     ? ` params=${JSON.stringify(policy.params)}`
@@ -269,4 +200,16 @@ export function explain(policy: AccessPolicy, ctx: RoleContext): string {
   ];
   return lines.join('\n');
 }
+
+// Re-export types
+export type {
+  PolicyRulePlugin,
+  PolicyRulePluginRegistry,
+  RuleProvider,
+  EvaluationContext,
+  EvaluationResult,
+  ResolutionConfig,
+  PolicyDecision,
+} from './types';
+
 
