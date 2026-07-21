@@ -231,11 +231,37 @@ model OutboxEvent {
   deliveredAt   DateTime?
   nextRetryAt   DateTime?
 
+  // Distributed claim lease for multi-instance outbox workers (issue #94).
+  // A worker claims a batch via `SELECT ... FOR UPDATE SKIP LOCKED` and
+  // stamps these three columns in the same statement. The row remains
+  // claimable by no one else until claimExpiresAt passes, at which point
+  // any worker (including a live one polling again) may reclaim it —
+  // this is how a crashed worker's in-flight rows self-heal without a
+  // separate reaper process. See services/outboxService.ts#claimPendingOutboxEvents.
+  claimedAt      DateTime?
+  claimedBy      String?
+  claimExpiresAt DateTime?
+
   @@index([status])
   @@index([communityId])
   @@index([eventType])
   @@index([createdAt])
   @@index([nextRetryAt])
+  // No (status, nextRetryAt, claimExpiresAt) composite index was added for
+  // the claim query, and this existing (status, nextRetryAt) index is not
+  // what serves it either — verified with EXPLAIN ANALYZE against 100k
+  // seeded rows (90% pending/leased, matching a high-contention shape) in a
+  // worst-case sort distribution (matching rows at the far end of createdAt
+  // order): the planner resolves the query via the @@index([createdAt])
+  // above (walking it in ORDER BY order, filtering, stopping at LIMIT), and
+  // falls back to a sequential scan if that index is unavailable. A
+  // composite (status, nextRetryAt, claimExpiresAt) index was tried and
+  // never chosen by the planner in either case — status alone has poor
+  // selectivity here (most pending rows are also past nextRetryAt), so an
+  // index scan on it costs about the same as a sequential scan — and
+  // dropping the (status, nextRetryAt) index changed neither plan nor cost.
+  // An unused index is a permanent write-path cost with no read-side
+  // benefit here, so neither was added.
   @@index([status, nextRetryAt])
   @@index([correlationId])
 }

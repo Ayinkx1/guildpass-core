@@ -16,13 +16,27 @@ import {
   OutboxEventHandler,
 } from "./outboxWorker";
 
+// Mock prisma to avoid requiring generated client
+jest.mock("../services/prisma", () => ({
+  getPrisma: jest.fn(() => ({
+    outboxEvent: {
+      findMany: jest.fn().mockResolvedValue([]),
+      update: jest.fn(),
+      create: jest.fn(),
+      deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+      count: jest.fn().mockResolvedValue(0),
+    },
+    $queryRaw: jest.fn().mockResolvedValue([]),
+  })),
+}));
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
  * Create a mock PrismaClient that feeds the given pending events to
- * $queryRaw (used by claimPendingOutboxEventsWithLock).
+ * $queryRaw (used by claimPendingOutboxEvents).
  */
 function makePrismaWithEvents(pendingEvents: any[] = []) {
   const events = [...pendingEvents];
@@ -66,27 +80,39 @@ function makePrismaWithEvents(pendingEvents: any[] = []) {
     deadLetterEvent: {
       create: jest.fn(async (args: any) => ({ id: "dl-1", ...args.data })),
     },
-    // $queryRaw is called by claimPendingOutboxEventsWithLock.
-    // Prisma.Sql objects expose .values[] for the interpolated parameters.
-    // The LIMIT is always the last value in the FOR UPDATE SKIP LOCKED query.
-    $queryRaw: jest.fn(async (sql: any): Promise<any[]> => {
-      const limit =
-        sql?.values && Array.isArray(sql.values)
-          ? (sql.values[sql.values.length - 1] as number) ?? 50
-          : 50;
-
-      let results = events.filter(
+    // Stub for claimPendingOutboxEvents' raw claim query (see
+    // services/outboxService.test.ts for the same pattern, documented
+    // there). Mutates `events` in place so a claimed row isn't reclaimed
+    // until its lease elapses — mirroring the real UPDATE's atomicity.
+    $queryRaw: jest.fn(async (_strings: TemplateStringsArray, ...values: any[]) => {
+      const [workerId, leaseMs, limit] = values;
+      const now = new Date();
+      const eligible = events.filter(
         (r: any) =>
           r.status === "pending" &&
           r.nextRetryAt &&
-          new Date(r.nextRetryAt) <= new Date(),
+          new Date(r.nextRetryAt) <= now &&
+          (!r.claimExpiresAt || new Date(r.claimExpiresAt) < now),
       );
-      results.sort(
-        (a, b) =>
-          new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+      eligible.sort(
+        (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
       );
-      results = results.slice(0, limit);
-      return results;
+      const claimed = eligible.slice(0, limit);
+      const claimExpiresAt = new Date(now.getTime() + leaseMs);
+      claimed.forEach((r: any) => {
+        r.claimedAt = now;
+        r.claimedBy = workerId;
+        r.claimExpiresAt = claimExpiresAt;
+      });
+      return claimed.map((r: any) => ({
+        id: r.id,
+        eventType: r.eventType,
+        entityId: r.entityId,
+        entityType: r.entityType,
+        communityId: r.communityId,
+        payload: r.payload,
+        createdAt: r.createdAt,
+      }));
     }),
     _updated: updated,
   };

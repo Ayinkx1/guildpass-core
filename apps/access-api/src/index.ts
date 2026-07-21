@@ -25,6 +25,8 @@ async function main() {
     maxBatchSize: config.outboxWorkerBatchSize,
     minBatchSize: config.outboxWorkerMinBatchSize,
     workerCount: config.outboxWorkerCount,
+    workerId: undefined, // Use a generated worker id (unique per process)
+    claimLeaseMs: config.outboxWorkerClaimLeaseMs,
   });
   outboxWorker.start();
 

@@ -1,11 +1,6 @@
 import { Prisma } from "@prisma/client";
 import type { PrismaClient } from "@prisma/client";
-import type {
-  OutboxEventType,
-  OutboxEventDto,
-  OutboxDispatchResult,
-  OutboxEventStatus,
-} from "@guildpass/shared-types";
+import type { OutboxEventType, OutboxDispatchResult } from "@guildpass/shared-types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +15,10 @@ type OutboxEventClient = {
 
 type PrismaLikeClient = {
   outboxEvent: OutboxEventClient;
+  // Tagged-template raw query, used only by claimPendingOutboxEvents for the
+  // `SELECT ... FOR UPDATE SKIP LOCKED` claim that Prisma's query builder
+  // cannot express.
+  $queryRaw: <T = any>(strings: TemplateStringsArray, ...values: any[]) => Promise<T>;
 };
 
 export type OutboxEventInput = {
@@ -99,6 +98,12 @@ export async function logOutboxEventTx(
 
 /**
  * Mark an outbox event as successfully delivered.
+ *
+ * Clears the claim lease (claimedAt/claimedBy/claimExpiresAt) alongside the
+ * status change. Not strictly required for correctness here — a delivered
+ * row never matches claimPendingOutboxEvents' `status = 'pending'`
+ * predicate regardless — but keeps the claim columns from holding stale
+ * data that would be confusing to read during an incident.
  */
 export async function markOutboxDelivered(
   db: PrismaLikeClient,
@@ -110,6 +115,9 @@ export async function markOutboxDelivered(
       status: "delivered",
       deliveredAt: new Date(),
       nextRetryAt: null,
+      claimedAt: null,
+      claimedBy: null,
+      claimExpiresAt: null,
     },
   });
 }
@@ -126,6 +134,14 @@ export interface MarkOutboxFailedResult {
  * If retries remain, increment the count and schedule the next retry.
  * Otherwise set to permanent failure and report it so the caller can
  * route the event into the dead-letter store.
+ *
+ * The retry branch clears the claim lease (claimedAt/claimedBy/
+ * claimExpiresAt) alongside scheduling nextRetryAt. This is load-bearing,
+ * not cosmetic: the row stays status='pending' for a retry, and
+ * claimPendingOutboxEvents' predicate treats a still-future claimExpiresAt
+ * as "currently claimed." Without clearing it here, a retried event would
+ * sit unclaimable until the *original* claim's lease happened to elapse,
+ * silently delaying redelivery well past its computed nextRetryAt.
  */
 export async function markOutboxFailed(
   db: PrismaLikeClient,
@@ -148,6 +164,9 @@ export async function markOutboxFailed(
         retryCount: nextCount,
         lastError: errorMessage,
         nextRetryAt: computeNextRetryAt(nextCount),
+        claimedAt: null,
+        claimedBy: null,
+        claimExpiresAt: null,
       },
     });
     return { permanentlyFailed: false, retryCount: nextCount };
@@ -160,6 +179,9 @@ export async function markOutboxFailed(
       retryCount: nextCount,
       lastError: errorMessage,
       nextRetryAt: null,
+      claimedAt: null,
+      claimedBy: null,
+      claimExpiresAt: null,
     },
   });
   return { permanentlyFailed: true, retryCount: nextCount };
@@ -169,40 +191,102 @@ export async function markOutboxFailed(
 // Query helpers (used by the worker)
 // ---------------------------------------------------------------------------
 
+/** Default claim lease if the caller doesn't supply one (see config.ts's
+ *  outboxWorkerClaimLeaseMs for the value actually used in production). */
+const DEFAULT_CLAIM_LEASE_MS = 60_000;
+
+export interface ClaimedOutboxEvent {
+  id: string;
+  eventType: string;
+  entityId: string | null;
+  entityType: string | null;
+  communityId: string | null;
+  payload: unknown;
+  createdAt: Date;
+}
+
 /**
- * Fetch pending (or retryable) outbox events that are due for processing,
- * ordered by creation time (oldest first).
+ * Atomically claim up to `limit` pending, due outbox events for this worker
+ * instance/shard via `SELECT ... FOR UPDATE SKIP LOCKED`, so that two
+ * workers polling the same table concurrently never claim the same row.
+ * This is the safe claim primitive — see claimPendingOutboxEventsWithLock
+ * below for why that alternative is not.
  *
- * NOTE: This uses a plain SELECT and is safe for single-worker deployments.
- * For multi-worker horizontal scaling use claimPendingOutboxEventsWithLock
- * instead, which uses SELECT ... FOR UPDATE SKIP LOCKED.
+ * This is a single `UPDATE ... RETURNING` statement — the claim lease
+ * (claimExpiresAt) is stamped in the same statement that locks the rows via
+ * the SKIP LOCKED subquery, so there is no separate "claim, then commit"
+ * step and no window where another worker could see a claimed row as free.
+ *
+ * Crash recovery is automatic and needs no reaper process: if this worker
+ * dies before calling markOutboxDelivered/markOutboxFailed, the row stays
+ * status='pending' with a claimExpiresAt that will elapse, and the WHERE
+ * clause below (`claimExpiresAt IS NULL OR claimExpiresAt < now()`) makes it
+ * claimable again by any worker's next poll.
+ *
+ * Trade-off, by design: SKIP LOCKED lets concurrent workers grab
+ * non-adjacent rows in the same instant, so cross-worker delivery order is
+ * no longer strictly createdAt-ascending the way a single worker's is
+ * today. See the README's "Integration Event Outbox" section.
+ *
+ * Note on ordering and `RETURNING`: Postgres does not guarantee that an
+ * `UPDATE ... WHERE id IN (subquery) RETURNING ...` returns rows in the
+ * subquery's `ORDER BY` — that ORDER BY only controls *which* rows the
+ * LIMIT selects, not the order the outer UPDATE reports them back in. So
+ * this function re-sorts the returned rows by (createdAt, id) itself,
+ * which is what actually preserves the single-worker, no-contention
+ * ordering guarantee the old Prisma `findMany({ orderBy })` gave for free.
  */
-export async function getPendingOutboxEvents(
+export async function claimPendingOutboxEvents(
   db: PrismaLikeClient,
-  limit: number = 50,
-): Promise<any[]> {
-  const now = new Date();
-  return db.outboxEvent.findMany({
-    where: {
-      status: "pending",
-      nextRetryAt: { lte: now },
-    },
-    orderBy: { createdAt: "asc" },
-    take: limit,
+  limit: number,
+  workerId: string,
+  leaseMs: number = DEFAULT_CLAIM_LEASE_MS,
+): Promise<ClaimedOutboxEvent[]> {
+  const claimed = await db.$queryRaw<ClaimedOutboxEvent[]>`
+    UPDATE "OutboxEvent"
+    SET "claimedAt" = now(),
+        "claimedBy" = ${workerId},
+        "claimExpiresAt" = now() + (${leaseMs}::text || ' milliseconds')::interval
+    WHERE id IN (
+      SELECT id FROM "OutboxEvent"
+      WHERE status = 'pending'::"OutboxEventStatus"
+        AND "nextRetryAt" <= now()
+        AND ("claimExpiresAt" IS NULL OR "claimExpiresAt" < now())
+      ORDER BY "createdAt" ASC, id ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING id, "eventType", "entityId", "entityType", "communityId", "payload", "createdAt";
+  `;
+
+  return claimed.sort((a, b) => {
+    const byCreatedAt = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+    return byCreatedAt !== 0 ? byCreatedAt : a.id.localeCompare(b.id);
   });
 }
 
 /**
- * Claim pending outbox events using SELECT ... FOR UPDATE SKIP LOCKED.
+ * @deprecated Do not wire this into any worker path — it does not actually
+ * prevent duplicate delivery. Kept for history/reference only; use
+ * claimPendingOutboxEvents above instead.
  *
- * This is the core partitioning primitive: each concurrent worker (or shard)
- * calls this function, and PostgreSQL guarantees that every event row is
- * claimed by exactly one caller.  Rows locked by another transaction are
- * skipped, so N workers can safely drain the queue in parallel without
- * duplicate delivery.
+ * This runs `SELECT ... FOR UPDATE SKIP LOCKED` as a single standalone
+ * `$queryRaw` call, not wrapped in an explicit transaction. Prisma commits a
+ * non-transactional raw query as soon as it returns, which releases the
+ * `FOR UPDATE` row lock immediately — before the caller has done anything
+ * with the claimed rows. Nothing here writes a durable "claimed" marker
+ * (no claimedAt/claimedBy/status change), so the moment this function
+ * returns, the rows it "claimed" are indistinguishable from unclaimed ones:
+ * status is still 'pending' and no lock is held. A second caller polling
+ * while the first is still running its handler against those rows (e.g.
+ * during a webhook HTTP call) will claim and deliver the same rows again.
  *
- * Requires a real PrismaClient (not the test-friendly PrismaLikeClient)
- * because it uses raw SQL via $queryRaw.
+ * Verified against a real Postgres instance: two sequential, independent
+ * `SELECT ... FOR UPDATE SKIP LOCKED` calls with no update in between both
+ * returned the identical row set. claimPendingOutboxEvents avoids this by
+ * stamping the claim lease in the same UPDATE statement that takes the
+ * lock, so the claim is a durable row value rather than a lock that has to
+ * outlive a single query.
  *
  * @returns Array of claimed outbox event rows (with all Prisma column names).
  */

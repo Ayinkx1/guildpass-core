@@ -555,7 +555,9 @@ describe('Membership Integration: Contract Events → API Access', () => {
 
   describe('Audit Chain of Custody Integration', () => {
     beforeEach(async () => {
-      await prisma.outboxEvent.deleteMany({});
+      await prisma.outboxEvent.deleteMany({
+        where: { communityId: { in: ['community-audit-test', 'community-integrity-test', 'community-multi-test'] } },
+      });
       await prisma.auditEvent.deleteMany({});
       await prisma.roleAssignment.deleteMany({});
       await prisma.membership.deleteMany({});
