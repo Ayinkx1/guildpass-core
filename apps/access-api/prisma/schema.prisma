@@ -515,5 +515,45 @@ model BlockHeader {
   @@index([blockNumber])
 }
 
+model StreakState {
+  id             String   @id @default(uuid())
+  walletId       String
+  communityId    String
+  currentStreak  Int      @default(0)
+  longestStreak  Int      @default(0)
+  lastActivityAt DateTime
+  graceUsed      Boolean  @default(false)
+  updatedAt      DateTime @updatedAt
+
+  @@unique([walletId, communityId])
+}
+
+enum RewardActionType {
+  GRANT_BADGE
+  UPGRADE_ROLE
+}
+
+model RewardRule {
+  id           String           @id @default(uuid())
+  communityId  String
+  milestone    Int              // streak count threshold
+  actionType   RewardActionType
+  actionParams Json             // e.g. { badgeLabel: "7-Day Streak" } or { role: "contributor" }
+  createdAt    DateTime         @default(now())
+
+  @@unique([communityId, milestone, actionType])
+}
+
+model StreakRewardHistory {
+  id          String   @id @default(uuid())
+  walletId    String
+  communityId String
+  ruleId      String
+  awardedAt   DateTime @default(now())
+
+  @@unique([walletId, communityId, ruleId])
+}
+
+
 
 
