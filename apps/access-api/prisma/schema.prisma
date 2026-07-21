@@ -554,6 +554,20 @@ model StreakRewardHistory {
   @@unique([walletId, communityId, ruleId])
 }
 
+model AttendanceRecord {
+  id          String   @id @default(uuid())
+  walletId    String
+  communityId String
+  eventId     String
+  source      String   // e.g. "manual", "webhook", "on-chain"
+  timestamp   DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  @@unique([walletId, eventId, source])
+  @@index([communityId])
+}
+
+
 
 
 
