@@ -16,6 +16,8 @@ import {
   BadgeMutationResult,
   ListBadgesResult,
   WalletAddress,
+  RoleDefinition,
+  DelegatedGrant,
 } from "@guildpass/shared-types";
 import {
   evaluate,
@@ -82,7 +84,7 @@ export function accessDecisionCacheKey({
   policyVersion: number | null;
   resourceVersion: number | null;
   overrideVersion: number | null;
-  delegationVersion: number | null;
+  delegationVersion?: number | null;
 }): string {
   return [
     "accessDecision",
@@ -160,7 +162,7 @@ function applyGovernanceDecision(
   },
 ): AccessDecision {
   const provider = new GovernanceRuleProvider(opts);
-  const effectiveRoles = base.effectiveRoles ?? resolveEffectiveRoles(ctx);
+  const effectiveRoles = (base.effectiveRoles ?? resolveEffectiveRoles(ctx)) as Role[];
   const govResult = provider.evaluate({
     policy: basePolicy,
     roleContext: ctx,
@@ -440,15 +442,38 @@ export function getMemberService(prismaClient: PrismaClient) {
     };
 
     // Fetch all role definitions and delegated grants for the community and wallet
-    const roleDefinitions = await prismaClient.roleDefinition.findMany({
+    const rawRoleDefinitions = await prismaClient.roleDefinition.findMany({
       where: { communityId },
     });
-    const delegatedGrants = await prismaClient.delegatedGrant.findMany({
+    const roleDefinitions: RoleDefinition[] = rawRoleDefinitions.map(def => ({
+      id: def.id,
+      communityId: def.communityId,
+      name: def.name,
+      description: def.description,
+      parentRoleId: def.parentRoleId,
+      builtInRole: def.builtInRole as Role | null,
+      createdAt: def.createdAt.toISOString(),
+      updatedAt: def.updatedAt.toISOString(),
+    }));
+
+    const rawDelegatedGrants = await prismaClient.delegatedGrant.findMany({
       where: {
         communityId,
         granteeWalletId: { in: wallets.map(w => w.id) },
       },
     });
+    const delegatedGrants: DelegatedGrant[] = rawDelegatedGrants.map(grant => ({
+      id: grant.id,
+      communityId: grant.communityId,
+      granterWalletId: grant.granterWalletId,
+      granteeWalletId: grant.granteeWalletId,
+      roles: grant.roles as Role[],
+      scope: grant.scope as Record<string, any> | null,
+      createdAt: grant.createdAt.toISOString(),
+      expiresAt: grant.expiresAt ? grant.expiresAt.toISOString() : null,
+      revokedAt: grant.revokedAt ? grant.revokedAt.toISOString() : null,
+      revokedBy: grant.revokedBy,
+    }));
 
     // 3. Get all overrides that apply to any of these wallets
     const overrides = await prismaClient.accessOverride.findMany({
