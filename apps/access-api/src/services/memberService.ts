@@ -3,6 +3,7 @@ import {
   AccessCheckInput,
   AccessDecision,
   AccessOverride,
+  AccessPolicy,
   AccessOverrideMutationInput,
   AccessOverrideMutationResult,
   Role,
@@ -10,9 +11,24 @@ import {
   AssignRoleInput,
   RemoveRoleInput,
   RoleMutationResult,
+  AssignBadgeInput,
+  RevokeBadgeInput,
+  BadgeMutationResult,
+  ListBadgesResult,
   WalletAddress,
 } from "@guildpass/shared-types";
-import { evaluate } from "@guildpass/policy-engine";
+import {
+  evaluate,
+  resolveConflicts,
+  resolveEffectiveRoles,
+  DEFAULT_RESOLUTION_CONFIG,
+  type EvaluationResult,
+} from "@guildpass/policy-engine";
+import type { ContributionScore } from "@guildpass/governance-engine";
+import {
+  GovernanceRuleProvider,
+  type ActiveGovernanceRule,
+} from "../policy/governanceRuleProvider";
 import { logEvent } from "./auditService";
 import { logOutboxEventTx } from "./outboxService";
 import { getIdentityService } from "./identityService";
@@ -56,6 +72,7 @@ export function accessDecisionCacheKey({
   policyVersion,
   resourceVersion,
   overrideVersion,
+  delegationVersion,
 }: {
   communityId: string;
   wallet: string;
@@ -65,6 +82,7 @@ export function accessDecisionCacheKey({
   policyVersion: number | null;
   resourceVersion: number | null;
   overrideVersion: number | null;
+  delegationVersion: number | null;
 }): string {
   return [
     "accessDecision",
@@ -76,6 +94,7 @@ export function accessDecisionCacheKey({
     `pv:${policyVersion ?? 0}`,
     `rsv:${resourceVersion ?? 0}`,
     `ov:${overrideVersion ?? 0}`,
+    `dv:${delegationVersion ?? 0}`,
   ].join("|");
 }
 
@@ -94,6 +113,89 @@ function resourceVersionKey(communityId: string) {
 function overrideVersionKey(communityId: string) {
   return `accessDecisionVersion:override|c:${communityId}`;
 }
+function delegationVersionKey(communityId: string) {
+  return `accessDecisionVersion:delegation|c:${communityId}`;
+}
+
+async function loadActiveGovernanceRules(
+  prismaClient: PrismaClient,
+  communityId: string,
+  resource: string,
+): Promise<ActiveGovernanceRule[]> {
+  const rules = await prismaClient.governanceRule.findMany({
+    where: { communityId, resource, active: true },
+  });
+  return rules.map((rule) => ({
+    id: rule.id,
+    name: rule.name,
+    resource: rule.resource,
+    ast: rule.ast as unknown as ActiveGovernanceRule["ast"],
+  }));
+}
+
+async function loadContributionScore(
+  prismaClient: PrismaClient,
+  wallet: string,
+  communityId: string,
+): Promise<ContributionScore | undefined> {
+  const score = await prismaClient.contributionScore.findUnique({
+    where: { walletId_communityId: { walletId: wallet, communityId } },
+  });
+  if (!score) return undefined;
+  return {
+    total: score.totalScore,
+    breakdown: (score.breakdown as ContributionScore["breakdown"]) ?? {},
+  };
+}
+
+function applyGovernanceDecision(
+  base: AccessDecision,
+  ctx: RoleContext,
+  basePolicy: AccessPolicy,
+  opts: {
+    rules: ActiveGovernanceRule[];
+    wallet: string;
+    communityId: string;
+    contributionScore?: ContributionScore;
+  },
+): AccessDecision {
+  const provider = new GovernanceRuleProvider(opts);
+  const effectiveRoles = base.effectiveRoles ?? resolveEffectiveRoles(ctx);
+  const govResult = provider.evaluate({
+    policy: basePolicy,
+    roleContext: ctx,
+    effectiveRoles,
+  });
+
+  if (govResult.result === "ABSTAIN") {
+    return base;
+  }
+
+  const baseResult: EvaluationResult = {
+    result: base.code,
+    explanation: base.reasons.map((r) => r.message).join("; "),
+    code: base.reasons[0]?.code,
+  };
+
+  const resolution = resolveConflicts(
+    [baseResult, govResult],
+    DEFAULT_RESOLUTION_CONFIG,
+  );
+
+  return {
+    allowed: resolution.decision === "ALLOW",
+    code: resolution.decision,
+    reasons: [
+      ...base.reasons,
+      {
+        code: govResult.code ?? `GOVERNANCE_${govResult.result}`,
+        message: govResult.explanation,
+      },
+    ],
+    effectiveRoles,
+    membershipState: base.membershipState,
+  };
+}
 
 export function getMemberService(prismaClient: PrismaClient) {
   const cacheService: CacheService = createDefaultCacheService(
@@ -106,13 +208,14 @@ export function getMemberService(prismaClient: PrismaClient) {
   const decisionTtlSeconds = config.accessDecisionCacheTtlSeconds;
 
   async function getVersionedKeyParts(communityId: string) {
-    const [membershipVersion, roleVersion, policyVersion, resourceVersion, overrideVersion] =
+    const [membershipVersion, roleVersion, policyVersion, resourceVersion, overrideVersion, delegationVersion] =
       await Promise.all([
         cacheService.getIncr(membershipVersionKey(communityId)),
         cacheService.getIncr(roleVersionKey(communityId)),
         cacheService.getIncr(policyVersionKey(communityId)),
         cacheService.getIncr(resourceVersionKey(communityId)),
         cacheService.getIncr(overrideVersionKey(communityId)),
+        cacheService.getIncr(delegationVersionKey(communityId)),
       ]);
 
     return {
@@ -121,6 +224,7 @@ export function getMemberService(prismaClient: PrismaClient) {
       policyVersion,
       resourceVersion,
       overrideVersion,
+      delegationVersion,
     };
   }
 
@@ -138,6 +242,9 @@ export function getMemberService(prismaClient: PrismaClient) {
   }
   async function bumpOverrideVersion(communityId: string) {
     await cacheService.incr(overrideVersionKey(communityId), versionTtlSeconds);
+  }
+  async function bumpDelegationVersion(communityId: string) {
+    await cacheService.incr(delegationVersionKey(communityId), versionTtlSeconds);
   }
 
   async function auditAccess(input: {
@@ -332,6 +439,17 @@ export function getMemberService(prismaClient: PrismaClient) {
       params: policy.params as Record<string, any> | undefined,
     };
 
+    // Fetch all role definitions and delegated grants for the community and wallet
+    const roleDefinitions = await prismaClient.roleDefinition.findMany({
+      where: { communityId },
+    });
+    const delegatedGrants = await prismaClient.delegatedGrant.findMany({
+      where: {
+        communityId,
+        granteeWalletId: { in: wallets.map(w => w.id) },
+      },
+    });
+
     // 3. Get all overrides that apply to any of these wallets
     const overrides = await prismaClient.accessOverride.findMany({
       where: {
@@ -360,7 +478,10 @@ export function getMemberService(prismaClient: PrismaClient) {
           reason: override.reason,
         })),
       };
-      const decision = evaluate(basePolicy, ctx);
+      const decision = evaluate(basePolicy, ctx, {
+        roleDefinitions,
+        delegatedGrants,
+      });
       const reasonCode = decision.reasons?.[0]?.code ?? null;
       const allowedDecision = decision.allowed ? "ALLOW" : "DENY";
       await auditAccess({
@@ -388,7 +509,29 @@ export function getMemberService(prismaClient: PrismaClient) {
       overrides: [],
     };
 
-    const decision = evaluate(basePolicy, ctx);
+    let decision = evaluate(basePolicy, ctx, {
+      roleDefinitions,
+      delegatedGrants,
+    });
+
+    const governanceRules = await loadActiveGovernanceRules(
+      prismaClient,
+      communityId,
+      resource,
+    );
+    if (governanceRules.length > 0) {
+      const contributionScore = await loadContributionScore(
+        prismaClient,
+        primaryWallet,
+        communityId,
+      );
+      decision = applyGovernanceDecision(decision, ctx, basePolicy, {
+        rules: governanceRules,
+        wallet: primaryWallet,
+        communityId,
+        contributionScore,
+      });
+    }
 
     const reasonCode = decision.reasons?.[0]?.code ?? null;
     const allowedDecision = decision.allowed ? "ALLOW" : "DENY";
@@ -612,14 +755,14 @@ export function getMemberService(prismaClient: PrismaClient) {
       if (!isRequesterAdmin) throw { statusCode: 403, message: "Not authorized" };
 
       const parsedExpiresAt = expiresAt ? new Date(expiresAt) : null;
-      const result = await prismaClient.$transaction(async (tx: any) => {
+      const { wasExisting } = await prismaClient.$transaction(async (tx: any) => {
         const existing = await tx.accessOverride.findFirst({
           where: { communityId, wallet: normalizedWallet, resource },
         });
 
-        let overrideRecord: any;
+        let record: any;
         if (existing) {
-          overrideRecord = await tx.accessOverride.update({
+          record = await tx.accessOverride.update({
             where: { id: existing.id },
             data: {
               effect,
@@ -628,7 +771,7 @@ export function getMemberService(prismaClient: PrismaClient) {
             },
           });
         } else {
-          overrideRecord = await tx.accessOverride.create({
+          record = await tx.accessOverride.create({
             data: {
               wallet: normalizedWallet,
               communityId,
@@ -641,8 +784,8 @@ export function getMemberService(prismaClient: PrismaClient) {
         }
 
         await logOutboxEventTx(tx, {
-          eventType: "ACCESS_OVERRIDE_CREATED",
-          entityId: overrideRecord.id,
+          eventType: existing ? "ACCESS_OVERRIDE_UPDATED" : "ACCESS_OVERRIDE_CREATED",
+          entityId: record.id,
           entityType: "AccessOverride",
           communityId,
           payload: {
@@ -654,7 +797,7 @@ export function getMemberService(prismaClient: PrismaClient) {
           },
         });
 
-        return overrideRecord;
+        return { overrideRecord: record, wasExisting: !!existing };
       });
 
       await bumpOverrideVersion(communityId);
@@ -663,7 +806,7 @@ export function getMemberService(prismaClient: PrismaClient) {
         wallet: normalizedWallet as any,
         resource,
         effect,
-        created: true,
+        created: !wasExisting,
         removed: false,
       };
     },
@@ -715,6 +858,56 @@ export function getMemberService(prismaClient: PrismaClient) {
       return { communityId, wallet: normalizedWallet as any, resource, effect: "DENY", created: false, removed: true };
     },
 
+    async listAccessOverrides(
+      communityId: string,
+      requesterWallet: string,
+    ): Promise<{
+      communityId: string;
+      overrides: Array<{
+        wallet: string;
+        resource: string;
+        effect: "ALLOW" | "DENY";
+        reason: string | null;
+        expiresAt: string | null;
+        expired: boolean;
+        createdAt: string;
+      }>;
+    }> {
+      const normalizedRequesterWallet = normaliseWallet(requesterWallet);
+      const requester = await prismaClient.wallet.findUnique({
+        where: { address: normalizedRequesterWallet },
+      });
+      if (!requester) throw { statusCode: 403, message: "Requester not found" };
+
+      const requesterMember = await prismaClient.member.findFirst({
+        where: { walletId: requester.id, communityId },
+        include: { roles: true },
+      });
+      const isRequesterAdmin = requesterMember?.roles.some(
+        (r) => r.role === "admin" && r.active,
+      );
+      if (!isRequesterAdmin) throw { statusCode: 403, message: "Not authorized" };
+
+      const overrides = await prismaClient.accessOverride.findMany({
+        where: { communityId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const now = Date.now();
+      return {
+        communityId,
+        overrides: overrides.map((o: any) => ({
+          wallet: o.wallet,
+          resource: o.resource,
+          effect: o.effect as "ALLOW" | "DENY",
+          reason: o.reason ?? null,
+          expiresAt: o.expiresAt ? o.expiresAt.toISOString() : null,
+          expired: !!o.expiresAt && o.expiresAt.getTime() < now,
+          createdAt: o.createdAt.toISOString(),
+        })),
+      };
+    },
+
     async removeMemberRole(input: RemoveRoleInput): Promise<RoleMutationResult> {
       const { requesterWallet, communityId, targetWallet, role } = input;
 
@@ -749,6 +942,151 @@ export function getMemberService(prismaClient: PrismaClient) {
 
       await bumpRoleVersion(communityId);
       return { communityId, wallet: targetWallet, role, assigned: false, removed: true };
+    },
+
+    async assignBadge(input: AssignBadgeInput): Promise<BadgeMutationResult> {
+      const { requesterWallet, communityId, targetWallet, label } = input;
+      if (!label || !label.trim()) {
+        throw new MemberServiceError("Badge label is required", 400);
+      }
+
+      const requester = await prismaClient.wallet.findUnique({
+        where: { address: normaliseWallet(requesterWallet) },
+      });
+      if (!requester) throw new MemberServiceError("Requester not found", 403);
+
+      const requesterMember = await prismaClient.member.findFirst({
+        where: { walletId: requester.id, communityId },
+        include: { roles: true },
+      });
+      const isRequesterAdmin = requesterMember?.roles.some(
+        (r) => r.role === "admin" && r.active,
+      );
+      if (!isRequesterAdmin) throw new MemberServiceError("Not authorized", 403);
+
+      const target = await prismaClient.wallet.findUnique({
+        where: { address: normaliseWallet(targetWallet) },
+      });
+      if (!target) throw new MemberServiceError("Target wallet not found", 404);
+
+      const targetMember = await prismaClient.member.findFirst({
+        where: { walletId: target.id, communityId },
+      });
+      if (!targetMember) throw new MemberServiceError("Target not a member", 404);
+
+      const badge = await prismaClient.$transaction(async (tx: any) => {
+        const created = await tx.badge.create({
+          data: {
+            memberId: targetMember.id,
+            label,
+          },
+        });
+
+        await logOutboxEventTx(tx, {
+          eventType: "BADGE_ASSIGNED",
+          entityId: created.id,
+          entityType: "Badge",
+          communityId,
+          payload: {
+            wallet: normaliseWallet(targetWallet),
+            label: created.label,
+          },
+        });
+
+        return created;
+      });
+
+      return {
+        communityId,
+        wallet: targetWallet,
+        badge: {
+          id: badge.id,
+          memberId: badge.memberId,
+          label: badge.label,
+          issuedAt: badge.issuedAt.toISOString(),
+        },
+        assigned: true,
+        removed: false,
+      };
+    },
+
+    async revokeBadge(input: RevokeBadgeInput): Promise<BadgeMutationResult> {
+      const { requesterWallet, communityId, targetWallet, badgeId } = input;
+
+      const requester = await prismaClient.wallet.findUnique({
+        where: { address: normaliseWallet(requesterWallet) },
+      });
+      if (!requester) throw new MemberServiceError("Requester not found", 403);
+
+      const requesterMember = await prismaClient.member.findFirst({
+        where: { walletId: requester.id, communityId },
+        include: { roles: true },
+      });
+      const isRequesterAdmin = requesterMember?.roles.some(
+        (r) => r.role === "admin" && r.active,
+      );
+      if (!isRequesterAdmin) throw new MemberServiceError("Not authorized", 403);
+
+      const target = await prismaClient.wallet.findUnique({
+        where: { address: normaliseWallet(targetWallet) },
+      });
+      if (!target) throw new MemberServiceError("Target wallet not found", 404);
+
+      const targetMember = await prismaClient.member.findFirst({
+        where: { walletId: target.id, communityId },
+      });
+      if (!targetMember) throw new MemberServiceError("Target not a member", 404);
+
+      const existing = await prismaClient.badge.findFirst({
+        where: { id: badgeId, memberId: targetMember.id },
+      });
+      if (!existing) {
+        return { communityId, wallet: targetWallet, assigned: false, removed: false, message: "Badge not found" };
+      }
+
+      await prismaClient.$transaction(async (tx: any) => {
+        await tx.badge.delete({ where: { id: existing.id } });
+        await logOutboxEventTx(tx, {
+          eventType: "BADGE_REVOKED",
+          entityId: existing.id,
+          entityType: "Badge",
+          communityId,
+          payload: {
+            wallet: normaliseWallet(targetWallet),
+            label: existing.label,
+          },
+        });
+      });
+
+      return { communityId, wallet: targetWallet, assigned: false, removed: true };
+    },
+
+    async listBadgesForMember(communityId: string, wallet: string): Promise<ListBadgesResult | null> {
+      const target = await prismaClient.wallet.findUnique({
+        where: { address: normaliseWallet(wallet) },
+      });
+      if (!target) return null;
+
+      const targetMember = await prismaClient.member.findFirst({
+        where: { walletId: target.id, communityId },
+      });
+      if (!targetMember) return null;
+
+      const badges = await prismaClient.badge.findMany({
+        where: { memberId: targetMember.id },
+        orderBy: { issuedAt: "desc" },
+      });
+
+      return {
+        communityId,
+        wallet: wallet as WalletAddress,
+        badges: badges.map((b) => ({
+          id: b.id,
+          memberId: b.memberId,
+          label: b.label,
+          issuedAt: b.issuedAt.toISOString(),
+        })),
+      };
     },
 
     bumpMembershipVersion,
