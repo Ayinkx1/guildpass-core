@@ -56,6 +56,7 @@ export function accessDecisionCacheKey({
   policyVersion,
   resourceVersion,
   overrideVersion,
+  delegationVersion,
 }: {
   communityId: string;
   wallet: string;
@@ -65,6 +66,7 @@ export function accessDecisionCacheKey({
   policyVersion: number | null;
   resourceVersion: number | null;
   overrideVersion: number | null;
+  delegationVersion: number | null;
 }): string {
   return [
     "accessDecision",
@@ -76,6 +78,7 @@ export function accessDecisionCacheKey({
     `pv:${policyVersion ?? 0}`,
     `rsv:${resourceVersion ?? 0}`,
     `ov:${overrideVersion ?? 0}`,
+    `dv:${delegationVersion ?? 0}`,
   ].join("|");
 }
 
@@ -94,6 +97,9 @@ function resourceVersionKey(communityId: string) {
 function overrideVersionKey(communityId: string) {
   return `accessDecisionVersion:override|c:${communityId}`;
 }
+function delegationVersionKey(communityId: string) {
+  return `accessDecisionVersion:delegation|c:${communityId}`;
+}
 
 export function getMemberService(prismaClient: PrismaClient) {
   const cacheService: CacheService = createDefaultCacheService(
@@ -106,13 +112,14 @@ export function getMemberService(prismaClient: PrismaClient) {
   const decisionTtlSeconds = config.accessDecisionCacheTtlSeconds;
 
   async function getVersionedKeyParts(communityId: string) {
-    const [membershipVersion, roleVersion, policyVersion, resourceVersion, overrideVersion] =
+    const [membershipVersion, roleVersion, policyVersion, resourceVersion, overrideVersion, delegationVersion] =
       await Promise.all([
         cacheService.getIncr(membershipVersionKey(communityId)),
         cacheService.getIncr(roleVersionKey(communityId)),
         cacheService.getIncr(policyVersionKey(communityId)),
         cacheService.getIncr(resourceVersionKey(communityId)),
         cacheService.getIncr(overrideVersionKey(communityId)),
+        cacheService.getIncr(delegationVersionKey(communityId)),
       ]);
 
     return {
@@ -121,6 +128,7 @@ export function getMemberService(prismaClient: PrismaClient) {
       policyVersion,
       resourceVersion,
       overrideVersion,
+      delegationVersion,
     };
   }
 
@@ -138,6 +146,9 @@ export function getMemberService(prismaClient: PrismaClient) {
   }
   async function bumpOverrideVersion(communityId: string) {
     await cacheService.incr(overrideVersionKey(communityId), versionTtlSeconds);
+  }
+  async function bumpDelegationVersion(communityId: string) {
+    await cacheService.incr(delegationVersionKey(communityId), versionTtlSeconds);
   }
 
   async function auditAccess(input: {
@@ -241,23 +252,37 @@ export function getMemberService(prismaClient: PrismaClient) {
     // If there are any overrides, they take precedence (policy engine handles this)
     if (overrides.length > 0) {
       // Find the most permissive or first applicable override (policy engine uses first one)
-      const ctx: RoleContext = {
-        assignments: [],
-        membershipState: "invited",
-        wallet: primaryWallet,
+      // Fetch all role definitions and delegated grants for the community and wallet
+    const roleDefinitions = await prismaClient.roleDefinition.findMany({
+      where: { communityId },
+    });
+    const delegatedGrants = await prismaClient.delegatedGrant.findMany({
+      where: {
         communityId,
-        resource,
-        overrides: overrides.map((override: AccessOverride) => ({
-          id: override.id,
-          wallet: override.wallet,
-          communityId: override.communityId,
-          resource: override.resource,
-          effect: override.effect as any,
-          expiresAt: override.expiresAt,
-          reason: override.reason,
-        })),
-      };
-      const decision = evaluate(basePolicy, ctx);
+        granteeWalletId: { in: wallets.map(w => w.id) },
+      },
+    });
+
+    const ctx: RoleContext = {
+      assignments: [],
+      membershipState: "invited",
+      wallet: primaryWallet,
+      communityId,
+      resource,
+      overrides: overrides.map((override: AccessOverride) => ({
+        id: override.id,
+        wallet: override.wallet,
+        communityId: override.communityId,
+        resource: override.resource,
+        effect: override.effect as any,
+        expiresAt: override.expiresAt,
+        reason: override.reason,
+      })),
+    };
+    const decision = evaluate(basePolicy, ctx, {
+      roleDefinitions,
+      delegatedGrants,
+    });
       const reasonCode = decision.reasons?.[0]?.code ?? null;
       const allowedDecision = decision.allowed ? "ALLOW" : "DENY";
       await auditAccess({
@@ -304,6 +329,17 @@ export function getMemberService(prismaClient: PrismaClient) {
       }
     }
 
+    // Fetch all role definitions and delegated grants for the community and wallet
+    const roleDefinitions = await prismaClient.roleDefinition.findMany({
+      where: { communityId },
+    });
+    const delegatedGrants = await prismaClient.delegatedGrant.findMany({
+      where: {
+        communityId,
+        granteeWalletId: { in: wallets.map(w => w.id) },
+      },
+    });
+
     const ctx: RoleContext = {
       assignments: allAssignments,
       membershipState,
@@ -313,7 +349,10 @@ export function getMemberService(prismaClient: PrismaClient) {
       overrides: [],
     };
 
-    const decision = evaluate(basePolicy, ctx);
+    const decision = evaluate(basePolicy, ctx, {
+      roleDefinitions,
+      delegatedGrants,
+    });
 
     const reasonCode = decision.reasons?.[0]?.code ?? null;
     const allowedDecision = decision.allowed ? "ALLOW" : "DENY";

@@ -105,15 +105,27 @@ export function getDefaultRegistry(): PolicyRulePluginRegistry {
 }
 
 /**
+ * Evaluate options, including role definitions and delegated grants
+ */
+export interface EvaluateOptions {
+  registry?: PolicyRulePluginRegistry;
+  roleDefinitions?: RoleDefinition[];
+  delegatedGrants?: DelegatedGrant[];
+}
+
+/**
  * Evaluate an access policy using the plugin registry (backward compatible)
  */
 export function evaluate(
   policy: AccessPolicy,
   ctx: RoleContext,
-  registry?: PolicyRulePluginRegistry,
+  options?: EvaluateOptions,
 ): AccessDecision {
-  const effectiveRoles = originalResolveEffectiveRoles(ctx);
-  const pluginRegistry = registry || defaultRegistry;
+  const effectiveRoles = originalResolveEffectiveRoles(ctx, {
+    roleDefinitions: options?.roleDefinitions,
+    delegatedGrants: options?.delegatedGrants,
+  });
+  const pluginRegistry = options?.registry || defaultRegistry;
 
   // Always start with membership state as reason
   const initialReasons: DecisionReason[] = [
@@ -137,7 +149,7 @@ export function evaluate(
       allowed: override.effect === "ALLOW",
       code: override.effect === "ALLOW" ? "ALLOW" : "DENY",
       reasons,
-      effectiveRoles,
+      effectiveRoles: effectiveRoles as Role[],
       membershipState: ctx.membershipState,
     };
   }
@@ -154,7 +166,7 @@ export function evaluate(
       allowed: false,
       code: "DENY",
       reasons,
-      effectiveRoles,
+      effectiveRoles: effectiveRoles as Role[],
       membershipState: ctx.membershipState,
     };
   }
@@ -171,13 +183,13 @@ export function evaluate(
       allowed: false,
       code: "DENY",
       reasons,
-      effectiveRoles,
+      effectiveRoles: effectiveRoles as Role[],
       membershipState: ctx.membershipState,
     };
   }
 
   // Use plugin to evaluate
-  return plugin.evaluate(policy, ctx, effectiveRoles);
+  return plugin.evaluate(policy, ctx, effectiveRoles as Role[]);
 }
 
 /**

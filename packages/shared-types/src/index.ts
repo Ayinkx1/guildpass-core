@@ -4,6 +4,39 @@ export type MembershipState = "invited" | "active" | "expired" | "suspended";
 
 export type Role = "admin" | "member" | "contributor";
 
+// --- Role Hierarchy & Delegation Types ---
+export interface RoleDefinition {
+  id: string;
+  name: string;
+  communityId: string;
+  description?: string | null;
+  parentRoleId?: string | null;
+  builtInRole?: Role | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DelegatedGrant {
+  id: string;
+  communityId: string;
+  granterWalletId: string;
+  granteeWalletId: string;
+  roles: string[];
+  scope?: Record<string, any> | null;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+  revokedBy?: string | null;
+  createdAt: string;
+}
+
+export interface RoleAssignment {
+  role: Role;
+  roleDefinitionId?: string | null;
+  source: "manual" | "auto";
+  active: boolean;
+  expiresAt?: string | Date | null;
+}
+
 // --- Wallet Linking Types ---
 
 export interface Challenge {
@@ -219,7 +252,12 @@ export type OutboxEventType =
   | "POLICY_DELETED"
   | "ACCESS_DECISION"
   | "ACCESS_OVERRIDE_CREATED"
-  | "ACCESS_OVERRIDE_REVOKED";
+  | "ACCESS_OVERRIDE_REVOKED"
+  | "DELEGATED_GRANT_CREATED"
+  | "DELEGATED_GRANT_REVOKED"
+  | "ROLE_DEFINITION_CREATED"
+  | "ROLE_DEFINITION_UPDATED"
+  | "ROLE_DEFINITION_DELETED";
 
 export type OutboxEventStatus = "pending" | "delivered" | "failed";
 
