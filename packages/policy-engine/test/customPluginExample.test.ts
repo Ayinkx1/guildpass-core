@@ -61,6 +61,7 @@ describe('Custom Policy Plugins', () => {
 
     // Create policy using the custom rule
     const policy: AccessPolicy = {
+      id: 'test-policy',
       communityId: 'test-community',
       resource: 'test-resource',
       ruleType: 'CUSTOM_EXAMPLE_RULE',
@@ -73,7 +74,7 @@ describe('Custom Policy Plugins', () => {
     };
 
     // Evaluate using our custom registry
-    const decision = evaluate(policy, context, registry);
+    const decision = evaluate(policy, context, { registry });
     expect(decision.allowed).toBe(true);
     expect(decision.reasons.some(r => r.code === 'CUSTOM_RULE_APPLIED')).toBe(true);
   });

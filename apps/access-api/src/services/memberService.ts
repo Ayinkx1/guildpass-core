@@ -648,14 +648,14 @@ export function getMemberService(prismaClient: PrismaClient) {
       if (!isRequesterAdmin) throw { statusCode: 403, message: "Not authorized" };
 
       const parsedExpiresAt = expiresAt ? new Date(expiresAt) : null;
-      const result = await prismaClient.$transaction(async (tx: any) => {
+      const { wasExisting } = await prismaClient.$transaction(async (tx: any) => {
         const existing = await tx.accessOverride.findFirst({
           where: { communityId, wallet: normalizedWallet, resource },
         });
 
-        let overrideRecord: any;
+        let record: any;
         if (existing) {
-          overrideRecord = await tx.accessOverride.update({
+          record = await tx.accessOverride.update({
             where: { id: existing.id },
             data: {
               effect,
@@ -664,7 +664,7 @@ export function getMemberService(prismaClient: PrismaClient) {
             },
           });
         } else {
-          overrideRecord = await tx.accessOverride.create({
+          record = await tx.accessOverride.create({
             data: {
               wallet: normalizedWallet,
               communityId,
@@ -677,8 +677,8 @@ export function getMemberService(prismaClient: PrismaClient) {
         }
 
         await logOutboxEventTx(tx, {
-          eventType: "ACCESS_OVERRIDE_CREATED",
-          entityId: overrideRecord.id,
+          eventType: existing ? "ACCESS_OVERRIDE_UPDATED" : "ACCESS_OVERRIDE_CREATED",
+          entityId: record.id,
           entityType: "AccessOverride",
           communityId,
           payload: {
@@ -690,7 +690,7 @@ export function getMemberService(prismaClient: PrismaClient) {
           },
         });
 
-        return overrideRecord;
+        return { overrideRecord: record, wasExisting: !!existing };
       });
 
       await bumpOverrideVersion(communityId);
@@ -699,7 +699,7 @@ export function getMemberService(prismaClient: PrismaClient) {
         wallet: normalizedWallet as any,
         resource,
         effect,
-        created: true,
+        created: !wasExisting,
         removed: false,
       };
     },
@@ -749,6 +749,56 @@ export function getMemberService(prismaClient: PrismaClient) {
 
       await bumpOverrideVersion(communityId);
       return { communityId, wallet: normalizedWallet as any, resource, effect: "DENY", created: false, removed: true };
+    },
+
+    async listAccessOverrides(
+      communityId: string,
+      requesterWallet: string,
+    ): Promise<{
+      communityId: string;
+      overrides: Array<{
+        wallet: string;
+        resource: string;
+        effect: "ALLOW" | "DENY";
+        reason: string | null;
+        expiresAt: string | null;
+        expired: boolean;
+        createdAt: string;
+      }>;
+    }> {
+      const normalizedRequesterWallet = normaliseWallet(requesterWallet);
+      const requester = await prismaClient.wallet.findUnique({
+        where: { address: normalizedRequesterWallet },
+      });
+      if (!requester) throw { statusCode: 403, message: "Requester not found" };
+
+      const requesterMember = await prismaClient.member.findFirst({
+        where: { walletId: requester.id, communityId },
+        include: { roles: true },
+      });
+      const isRequesterAdmin = requesterMember?.roles.some(
+        (r) => r.role === "admin" && r.active,
+      );
+      if (!isRequesterAdmin) throw { statusCode: 403, message: "Not authorized" };
+
+      const overrides = await prismaClient.accessOverride.findMany({
+        where: { communityId },
+        orderBy: { createdAt: "desc" },
+      });
+
+      const now = Date.now();
+      return {
+        communityId,
+        overrides: overrides.map((o: any) => ({
+          wallet: o.wallet,
+          resource: o.resource,
+          effect: o.effect as "ALLOW" | "DENY",
+          reason: o.reason ?? null,
+          expiresAt: o.expiresAt ? o.expiresAt.toISOString() : null,
+          expired: !!o.expiresAt && o.expiresAt.getTime() < now,
+          createdAt: o.createdAt.toISOString(),
+        })),
+      };
     },
 
     async removeMemberRole(input: RemoveRoleInput): Promise<RoleMutationResult> {

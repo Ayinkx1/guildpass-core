@@ -65,8 +65,11 @@ export class PolicyEngine {
    * @returns AccessDecision with allow/deny and detailed reasons
    */
   evaluate(policy: AccessPolicy, roleContext: RoleContext): AccessDecision {
-    // Resolve effective roles (includes hierarchy and membership state)
-    const effectiveRoles = resolveEffectiveRoles(roleContext);
+    // Resolve effective roles (includes hierarchy and membership state).
+    // Cast: resolveEffectiveRoles also admits custom role-definition names
+    // (string), but this legacy engine's context/decision types predate that
+    // and are pinned to the built-in Role enum.
+    const effectiveRoles = resolveEffectiveRoles(roleContext) as Role[];
 
     // Build evaluation context
     const context: EvaluationContext = {

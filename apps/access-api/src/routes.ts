@@ -24,6 +24,7 @@ import {
   revokeBadgeSchema,
   createAccessOverrideSchema,
   revokeAccessOverrideSchema,
+  listAccessOverridesSchema,
   accessCheckSchema,
   listCommunityMembersSchema,
   listDeadLetterEventsSchema,
@@ -434,6 +435,24 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(200).send(result);
     } catch (error) {
       return sendRoleMutationError(reply, error);
+    }
+  });
+
+  // GET /v1/communities/:communityId/overrides — list access overrides for a community (admin)
+  app.get('/v1/communities/:communityId/overrides', { schema: listAccessOverridesSchema, preHandler: [authenticateApiKey] }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { communityId } = request.params as { communityId: string };
+    const requesterWallet = getRequesterWallet(request);
+    try {
+      if (!(await requireCommunityAdmin(communityId, requesterWallet))) {
+        return reply.status(403).send({ error: 'Forbidden' });
+      }
+      const result = await memberService.listAccessOverrides(communityId, requesterWallet);
+      return reply.status(200).send(result);
+    } catch (error) {
+      if (error instanceof MemberServiceError) {
+        return reply.status(error.statusCode).send({ error: error.message });
+      }
+      return reply.status(500).send({ error: 'Internal server error' });
     }
   });
 
