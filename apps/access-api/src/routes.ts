@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { getMemberService, MemberServiceError } from './services/memberService';
 import { getIdentityService, IdentityServiceError } from './services/identityService';
 import { getModerationService, ModerationError } from './services/moderation/moderationService';
+import { queryAuditEvents } from './services/auditService';
 import { getPrisma } from './services/prisma';
 import { notFound, validationError, validationErrorWithReason } from './errors';
 import {
@@ -22,6 +23,7 @@ import {
   listCommunityMembersSchema,
   listDeadLetterEventsSchema,
   retryDeadLetterEventSchema,
+  listAuditEventsSchema,
 } from './schemas';
 import { authenticateApiKey, authenticateSessionOrApiKey, verifySiweSignature } from './lib/auth/auth';
 import crypto from 'crypto';
@@ -470,4 +472,60 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // GET /v1/communities/:communityId/audit-events — filterable, paginated audit events for community admin
+  app.get('/v1/communities/:communityId/audit-events', { schema: listAuditEventsSchema, preHandler: [authenticateApiKey] }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { communityId } = request.params as { communityId: string };
+    const { actorWallet, eventType, resource, from, to, page, limit } = request.query as {
+      actorWallet?: string;
+      eventType?: string;
+      resource?: string;
+      from?: string;
+      to?: string;
+      page?: number;
+      limit?: number;
+    };
+    const requesterWallet = getRequesterWallet(request);
+    try {
+      if (!(await requireCommunityAdmin(communityId, requesterWallet))) {
+        return reply.status(403).send({ error: 'Forbidden' });
+      }
+
+      let parsedFrom: Date | undefined = undefined;
+      let parsedTo: Date | undefined = undefined;
+
+      if (from) {
+        parsedFrom = new Date(from);
+        if (isNaN(parsedFrom.getTime())) {
+          return reply.status(400).send(validationError('Invalid from date format'));
+        }
+      }
+
+      if (to) {
+        parsedTo = new Date(to);
+        if (isNaN(parsedTo.getTime())) {
+          return reply.status(400).send(validationError('Invalid to date format'));
+        }
+      }
+
+      const result = await queryAuditEvents(getPrisma(), {
+        communityId,
+        actorWallet,
+        eventType,
+        resource,
+        from: parsedFrom,
+        to: parsedTo,
+        page: page ? Number(page) : undefined,
+        limit: limit ? Number(limit) : undefined,
+      });
+
+      return result;
+    } catch (error) {
+      if (error instanceof MemberServiceError) {
+        return reply.status(error.statusCode).send({ error: error.message });
+      }
+      return reply.status(500).send({ error: 'Internal server error' });
+    }
+  });
+
 }
+
