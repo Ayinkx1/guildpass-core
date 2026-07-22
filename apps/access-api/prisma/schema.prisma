@@ -12,6 +12,8 @@ model Community {
   resources   Resource[]
   overrides   AccessOverride[]
   rules       GovernanceRule[]
+  delegatedGrants DelegatedGrant[]
+  roleDefinitions RoleDefinition[]
   createdAt   DateTime          @default(now())
 }
 
@@ -26,6 +28,8 @@ model Wallet {
   secondaryLinkedWallets LinkedWallet[] @relation("secondaryWallet")
   challenges            Challenge[] @relation("challengePrimaryWallet")
   secondaryChallenges   Challenge[] @relation("challengeSecondaryWallet")
+  delegatedGrantsAsGranter DelegatedGrant[] @relation("DelegatedGrantGranter")
+  delegatedGrantsAsGrantee DelegatedGrant[] @relation("DelegatedGrantGrantee")
 }
 
 // --- Wallet Linking Models ---
@@ -134,6 +138,7 @@ model RoleDefinition {
   updatedAt   DateTime        @updatedAt
 
   community Community @relation(fields: [communityId], references: [id])
+  roleAssignments RoleAssignment[]
 
   @@unique([communityId, name])
   @@index([parentRoleId])

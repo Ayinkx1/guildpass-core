@@ -5,6 +5,8 @@ import {
   DecisionReason,
   RoleContext,
   Role,
+  RoleDefinition,
+  DelegatedGrant,
 } from "@guildpass/shared-types";
 import { resolveEffectiveRoles as originalResolveEffectiveRoles } from "./roles";
 import {
@@ -32,7 +34,6 @@ export type {
   PolicyDecision,
   ResolutionConfig,
 } from "./types";
-export { PolicyEngine, createDefaultEngine } from "./engine";
 export {
   resolveConflicts,
   buildDecisionReasons,
@@ -219,7 +220,7 @@ export function explain(
   ctx: RoleContext,
   registry?: PolicyRulePluginRegistry,
 ): string {
-  const decision = evaluate(policy, ctx, registry);
+  const decision = evaluate(policy, ctx, registry ? { registry } : undefined);
   const status = decision.allowed ? 'ALLOWED' : 'DENIED';
   const paramsString = policy.params
     ? ` params=${JSON.stringify(policy.params)}`
@@ -233,14 +234,7 @@ export function explain(
 }
 
 // Re-export types
-export type {
-  PolicyRulePlugin,
-  PolicyRulePluginRegistry,
-  RuleProvider,
-  EvaluationContext,
-  EvaluationResult,
-  ResolutionConfig,
-  PolicyDecision,
-} from './types';
+export type { PolicyRulePlugin } from './types';
+export { PolicyRulePluginRegistry } from './types';
 
 

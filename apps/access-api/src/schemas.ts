@@ -333,6 +333,59 @@ export const createAccessOverrideSchema = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// GET /v1/communities/:communityId/overrides
+// ---------------------------------------------------------------------------
+
+export const listAccessOverridesSchema = {
+  summary: 'List access overrides for a community (admin)',
+  tags: ['Overrides'],
+  params: {
+    type: 'object',
+    required: ['communityId'],
+    properties: {
+      communityId: { type: 'string', description: 'Community identifier' },
+    },
+  },
+  response: {
+    200: {
+      description: 'Access overrides for the community',
+      type: 'object',
+      required: ['communityId', 'overrides'],
+      properties: {
+        communityId: { type: 'string' },
+        overrides: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['wallet', 'resource', 'effect', 'expired', 'createdAt'],
+            properties: {
+              wallet: walletAddressSchema,
+              resource: { type: 'string' },
+              effect: { type: 'string', enum: ['ALLOW', 'DENY'] },
+              reason: { type: 'string', nullable: true },
+              expiresAt: { type: 'string', format: 'date-time', nullable: true },
+              expired: {
+                type: 'boolean',
+                description: 'Whether expiresAt has passed; expired overrides no longer affect access decisions',
+              },
+              createdAt: { type: 'string', format: 'date-time' },
+            },
+          },
+        },
+      },
+    },
+    403: {
+      description: 'Forbidden — requester does not have permission',
+      ...forbiddenSchema,
+    },
+    500: {
+      description: 'Internal server error',
+      ...forbiddenSchema,
+    },
+  },
+} as const;
+
+// ---------------------------------------------------------------------------
 // DELETE /v1/communities/:communityId/overrides/:wallet/:resource
 // ---------------------------------------------------------------------------
 
