@@ -773,3 +773,129 @@ export const retryDeadLetterEventSchema = {
     },
   },
 } as const;
+
+// ---------------------------------------------------------------------------
+// GET /v1/communities/:communityId/audit-events
+// ---------------------------------------------------------------------------
+
+export const listAuditEventsSchema = {
+  summary: 'List and filter audit events for a community (admin only)',
+  tags: ['Audit'],
+  params: {
+    type: 'object',
+    required: ['communityId'],
+    properties: {
+      communityId: { type: 'string', description: 'Community identifier' },
+    },
+  },
+  querystring: {
+    type: 'object',
+    properties: {
+      actorWallet: {
+        type: 'string',
+        description: 'Filter events by actor wallet address',
+      },
+      eventType: {
+        type: 'string',
+        enum: [
+          'ACCESS_CHECK',
+          'MEMBERSHIP_CREATED',
+          'MEMBERSHIP_UPDATED',
+          'MEMBERSHIP_DELETED',
+          'POLICY_EVALUATION',
+          'MEMBERSHIP_RECONCILED',
+          'OTHER',
+        ],
+        description: 'Filter events by event type',
+      },
+      resource: {
+        type: 'string',
+        description: 'Filter events by resource identifier',
+      },
+      from: {
+        type: 'string',
+        format: 'date-time',
+        description: 'ISO 8601 timestamp to filter events created at or after',
+      },
+      to: {
+        type: 'string',
+        format: 'date-time',
+        description: 'ISO 8601 timestamp to filter events created at or before',
+      },
+      page: {
+        type: 'integer',
+        minimum: 1,
+        default: 1,
+        description: 'Page number for pagination',
+      },
+      limit: {
+        type: 'integer',
+        minimum: 1,
+        maximum: 100,
+        default: 20,
+        description: 'Number of events per page',
+      },
+    },
+  },
+  response: {
+    200: {
+      description: 'Paginated audit events list',
+      type: 'object',
+      required: ['events', 'pagination'],
+      properties: {
+        events: {
+          type: 'array',
+          items: {
+            type: 'object',
+            required: ['id', 'eventType', 'createdAt'],
+            properties: {
+              id: { type: 'string', format: 'uuid' },
+              eventType: { type: 'string' },
+              walletId: { type: 'string', nullable: true },
+              communityId: { type: 'string', nullable: true },
+              resource: { type: 'string', nullable: true },
+              policyRule: { type: 'string', nullable: true },
+              decision: { type: 'string', nullable: true },
+              reasonCode: { type: 'string', nullable: true },
+              beforeState: { type: 'object', additionalProperties: true, nullable: true },
+              afterState: { type: 'object', additionalProperties: true, nullable: true },
+              correlationId: { type: 'string', nullable: true },
+              chainId: { type: 'integer', nullable: true },
+              txHash: { type: 'string', nullable: true },
+              blockNumber: { type: 'integer', nullable: true },
+              logIndex: { type: 'integer', nullable: true },
+              membershipStateVersion: { type: 'string', nullable: true },
+              roleStateVersion: { type: 'string', nullable: true },
+              recordHash: { type: 'string', nullable: true },
+              previousRecordHash: { type: 'string', nullable: true },
+              createdAt: { type: 'string', format: 'date-time' },
+            },
+          },
+        },
+        pagination: {
+          type: 'object',
+          required: ['page', 'limit', 'total', 'totalPages'],
+          properties: {
+            page: { type: 'integer' },
+            limit: { type: 'integer' },
+            total: { type: 'integer' },
+            totalPages: { type: 'integer' },
+          },
+        },
+      },
+    },
+    400: {
+      description: 'Validation error (e.g. invalid date format)',
+      ...errorSchema,
+    },
+    403: {
+      description: 'Forbidden — requester is not a community admin',
+      ...forbiddenSchema,
+    },
+    500: {
+      description: 'Internal server error',
+      ...forbiddenSchema,
+    },
+  },
+} as const;
+
