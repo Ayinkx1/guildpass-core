@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 -- CreateEnum
 CREATE TYPE "MembershipState" AS ENUM ('invited', 'active', 'expired', 'suspended');
 
